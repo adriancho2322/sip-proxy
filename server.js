@@ -2,6 +2,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const dgram = require('dgram');
+const net = require('net');
 const WebSocket = require('ws');
 const sip = require('sip');
 const crypto = require('crypto');
@@ -26,6 +27,39 @@ const server = http.createServer((req, res) => {
         res.setHeader('Content-Type', 'text/plain');
         res.end('SRV: ' + (err ? err.code : JSON.stringify(srv)) + '\nA: ' + (err2 ? err2.code : JSON.stringify(addrs)));
       });
+    });
+  }
+  else if (req.url === '/siptest') {
+    dns.resolve4('webdial.keepcalling.net', (err, addrs) => {
+      if (err) { res.end('DNS error: ' + err.code); return; }
+      const ip = addrs[0];
+      const sock = new net.Socket();
+      sock.setTimeout(8000);
+      let responded = false;
+      sock.connect(5060, ip, () => {
+        const msg = [
+          'OPTIONS sip:webdial.keepcalling.net SIP/2.0',
+          'Via: SIP/2.0/TCP 0.0.0.0:0;branch=z9hG4bK-test123',
+          'From: <sip:test@test.com>;tag=test',
+          'To: <sip:test@webdial.keepcalling.net>',
+          'Call-ID: test123@test',
+          'CSeq: 1 OPTIONS',
+          'Contact: <sip:test@0.0.0.0>',
+          'Max-Forwards: 70',
+          'Content-Length: 0',
+          '', '',
+        ].join('\r\n');
+        sock.write(msg);
+      });
+      let buf = '';
+      sock.on('data', (data) => { buf += data.toString(); });
+      sock.on('timeout', () => { if (!responded) { responded = true; res.end('TCP timeout after connect'); } sock.destroy(); });
+      sock.on('error', (e) => { if (!responded) { responded = true; res.end('TCP error: ' + e.message); } sock.destroy(); });
+      setTimeout(() => {
+        if (!responded) { responded = true;
+          res.end('Response len=' + buf.length + '\n' + buf.slice(0, 2000));
+        } sock.destroy();
+      }, 5000);
     });
   }
   else { res.writeHead(404); res.end('Not found'); }
