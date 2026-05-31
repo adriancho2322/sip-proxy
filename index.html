@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SIP Caller</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: Arial, Helvetica, sans-serif;
+  background: #0a0c10; color: #e2e8f0; min-height: 100vh;
+  display: -webkit-box; display: -ms-flexbox; display: flex;
+  -webkit-box-align: center; -ms-flex-align: center; align-items: center;
+  -webkit-box-pack: center; -ms-flex-pack: center; justify-content: center;
+}
+body::before {
+  content: ''; position: fixed; top:0;left:0;right:0;bottom:0;
+  background-image: linear-gradient(rgba(0,229,160,.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,229,160,.04) 1px, transparent 1px);
+  background-size: 48px 48px; pointer-events: none;
+}
+.card {
+  position: relative; background: #111318; border: 1px solid #1e2330;
+  border-radius: 16px; padding: 36px; width: 360px; max-width: 95vw;
+  box-shadow: 0 30px 80px rgba(0,0,0,.6);
+}
+.card::before {
+  content: ''; position: absolute; top: 0; left: 36px; right: 36px; height: 1px;
+  background: linear-gradient(90deg, transparent, #00e5a0, transparent); opacity: .5;
+}
+.header {
+  display: -webkit-box; display: -ms-flexbox; display: flex;
+  -webkit-box-align: center; -ms-flex-align: center; align-items: center;
+  gap: 12px; margin-bottom: 28px;
+}
+.logo-icon {
+  width:36px; height:36px; background:linear-gradient(135deg,#0088ff,#00e5a0);
+  border-radius:10px; display:-webkit-box; display:-ms-flexbox; display:flex;
+  -webkit-box-align:center; -ms-flex-align:center; align-items:center;
+  -webkit-box-pack:center; -ms-flex-pack:center; justify-content:center;
+  font-size:17px; -ms-flex-negative:0; flex-shrink:0;
+}
+.logo-text { font-size:18px; font-weight:bold; }
+.logo-text span { color:#00e5a0; }
+.status-pill {
+  margin-left:auto; display:-webkit-box; display:-ms-flexbox; display:flex;
+  -webkit-box-align:center; -ms-flex-align:center; align-items:center; gap:6px;
+  font-family:monospace; font-size:10px; color:#5a6480;
+  background:rgba(255,255,255,.04); border:1px solid #1e2330;
+  border-radius:20px; padding:4px 10px;
+}
+.status-dot { width:6px; height:6px; border-radius:50%; background:#5a6480; }
+.pill-ok   { color:#00e5a0; border-color:rgba(0,229,160,.3); }
+.pill-ok   .status-dot { background:#00e5a0; }
+.pill-busy { color:#0088ff; border-color:rgba(0,136,255,.3); }
+.pill-busy .status-dot { background:#0088ff; }
+.pill-call { color:#00e5a0; border-color:rgba(0,229,160,.4); }
+.pill-call .status-dot { background:#00e5a0; }
+.pill-err  { color:#ff3b5c; border-color:rgba(255,59,92,.3); }
+.pill-err  .status-dot { background:#ff3b5c; }
+@-webkit-keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+@keyframes         blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+.pill-ok .status-dot, .pill-busy .status-dot, .pill-call .status-dot {
+  -webkit-animation:blink 1.5s infinite; animation:blink 1.5s infinite;
+}
+label {
+  display:block; font-size:10px; font-family:monospace; color:#5a6480;
+  letter-spacing:1.5px; text-transform:uppercase; margin-bottom:7px;
+}
+.field { margin-bottom:18px; }
+.input-wrap { position:relative; }
+.input-icon {
+  position:absolute; left:13px; top:50%;
+  -webkit-transform:translateY(-50%); -ms-transform:translateY(-50%); transform:translateY(-50%);
+  color:#5a6480; font-size:14px; pointer-events:none;
+}
+input[type="tel"] {
+  width:100%; background:rgba(255,255,255,.03); border:1px solid #1e2330;
+  border-radius:10px; padding:12px 14px 12px 38px; color:#e2e8f0;
+  font-family:monospace; font-size:15px; letter-spacing:1px; outline:none;
+  -webkit-appearance:none; -moz-appearance:none; appearance:none;
+}
+input[type="tel"]:focus { border-color:rgba(0,229,160,.5); background:rgba(0,229,160,.03); }
+.call-state {
+  font-family:monospace; font-size:12px; text-align:center; color:#0088ff;
+  letter-spacing:1px; min-height:20px; margin:14px 0 6px;
+}
+.btn-row {
+  display:-webkit-box; display:-ms-flexbox; display:flex; gap:12px; margin-top:8px;
+}
+.btn {
+  -webkit-box-flex:1; -ms-flex:1; flex:1; border:none; border-radius:11px;
+  padding:13px; font-family:Arial,Helvetica,sans-serif; font-weight:bold;
+  font-size:14px; cursor:pointer;
+  -webkit-transition:opacity .2s,-webkit-transform .1s; transition:opacity .2s,transform .1s;
+}
+.btn:active { -webkit-transform:scale(.96); -ms-transform:scale(.96); transform:scale(.96); }
+.btn:disabled { opacity:.35; cursor:not-allowed; -webkit-transform:none; -ms-transform:none; transform:none; }
+.btn-connect { background:linear-gradient(135deg,#00c87a,#00e5a0); color:#003020; }
+.btn-hangup  { background:linear-gradient(135deg,#c02040,#ff3b5c); color:#fff; }
+.log {
+  margin-top:18px; background:rgba(0,0,0,.35); border:1px solid #1e2330;
+  border-radius:10px; padding:10px 13px; font-family:monospace; font-size:11px;
+  color:#5a6480; min-height:34px; max-height:90px; overflow-y:auto; line-height:1.65;
+  word-break:break-all;
+}
+.log .ok  { color:#00e5a0; }
+.log .err { color:#ff3b5c; }
+.log .inf { color:#0088ff; }
+.log::-webkit-scrollbar { width:4px; }
+.log::-webkit-scrollbar-thumb { background:#1e2330; border-radius:4px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="header">
+    <div class="logo-icon">&#128222;</div>
+    <div class="logo-text">SIP<span>call</span></div>
+    <div class="status-pill" id="pill">
+      <div class="status-dot"></div>
+      <span id="pillTxt">conectando&hellip;</span>
+    </div>
+  </div>
+
+  <div class="field">
+    <label>N&uacute;mero Origen (tu tel&eacute;fono)</label>
+    <div class="input-wrap">
+      <span class="input-icon">&#128100;</span>
+      <input type="tel" id="fromNum" placeholder="ej. +15551234567" autocomplete="off">
+    </div>
+  </div>
+
+  <div class="field">
+    <label>N&uacute;mero Destino</label>
+    <div class="input-wrap">
+      <span class="input-icon">&#128242;</span>
+      <input type="tel" id="toNum" placeholder="ej. +15559876543" autocomplete="off">
+    </div>
+  </div>
+
+  <div class="call-state" id="callState"></div>
+
+  <div class="btn-row">
+    <button class="btn btn-connect" id="btnCall" onclick="makeCall()" disabled="disabled">&#9654; Conectar</button>
+    <button class="btn btn-hangup"  id="btnHangup" onclick="hangup()" disabled="disabled">&#10005; Finalizar</button>
+  </div>
+
+  <div class="log" id="log"><span class="inf">&#8250; Iniciando&hellip;</span></div>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  var _u = atob('d2VzNTE2OTgwNTcwOQ==');
+  var _p = atob('MTM4ZTU4Nzg2N2Y5MGJhNmM1YzVmYjljMTZiNzNjYzM=');
+  var _s = atob('d2ViZGlhbC5rZWVwY2FsbGluZy5uZXQ=');
+  var SERVER = 'wss://sip.jash.site';
+
+  var ws = null, sessionID = null, reqID = 0, callActive = false, reconnTimer = null;
+
+  function g(id) { return document.getElementById(id); }
+
+  function addLog(msg, cls) {
+    var box = g('log');
+    var d = document.createElement('div');
+    if (cls) { d.className = cls; }
+    d.appendChild(document.createTextNode('\u203a ' + msg));
+    box.appendChild(d);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function setStatus(txt, cls) {
+    var pill = g('pill');
+    pill.className = 'status-pill' + (cls ? ' ' + cls : '');
+    g('pillTxt').textContent = txt;
+  }
+
+  function setCallState(txt) { g('callState').textContent = txt; }
+
+  function nextID() { reqID += 1; return String(reqID); }
+
+  function wsSend(obj) {
+    if (ws && ws.readyState === 1) {
+      try { ws.send(JSON.stringify(obj)); } catch (e) { addLog('Error envio: ' + e.message, 'err'); }
+    }
+  }
+
+  function sendReq(data) { wsSend({ reqID: nextID(), reqData: data }); }
+
+  function sendCallerCfg(phone) {
+    sendReq({ SetDialConfig: { phoneNum: phone, callerID: null, callerName: null, extraDialConfig: null } });
+  }
+
+  var STATES = {
+    NoCall:          { txt: '',                        cls: 'pill-ok',   call: false },
+    Initiated:       { txt: 'Llamando tu telefono...', cls: 'pill-busy', call: true  },
+    RingingCaller:   { txt: 'Sonando tu telefono...',  cls: 'pill-busy', call: true  },
+    CallerIdle:      { txt: 'Telefono listo',          cls: 'pill-ok',   call: true  },
+    InitiatedCallee: { txt: 'Marcando destino...',     cls: 'pill-busy', call: true  },
+    RingingCallee:   { txt: 'Sonando destino...',      cls: 'pill-busy', call: true  },
+    Connected:       { txt: 'LLAMADA CONECTADA',       cls: 'pill-call', call: true  }
+  };
+
+  function handleCallEvent(state) {
+    var key = (state && typeof state === 'object') ? Object.keys(state)[0] : 'NoCall';
+    var s = STATES[key] || { txt: key, cls: 'pill-busy', call: callActive };
+    setCallState(s.txt);
+    setStatus(key, s.cls);
+    callActive = s.call;
+    addLog('Estado: ' + key, s.cls === 'pill-call' ? 'ok' : 'inf');
+    g('btnCall').disabled   = s.call;
+    g('btnHangup').disabled = !s.call;
+  }
+
+  function onMessage(evt) {
+    var raw = (evt && evt.data) ? String(evt.data) : '';
+    var msg;
+    try { msg = JSON.parse(raw); } catch (e) { return; }
+    if (!msg || typeof msg !== 'object') { return; }
+
+    if (Object.prototype.hasOwnProperty.call(msg, 'HaveSessionQ')) {
+      addLog('Handshake -> enviando credenciales', 'inf');
+      wsSend({ NewSession: { majorVersion: 1, midVersion: 0, minVersion: 0 } });
+      return;
+    }
+    if (msg.StartSession) {
+      sessionID = msg.StartSession;
+      addLog('Sesion iniciada \u2713', 'ok');
+      setStatus('listo', 'pill-ok');
+      sendReq({ SetSIPAccount: {
+        sipUserName: _u, sipPassword: _p, sipDomain: _s,
+        sipDirectMedia: false, sipEnableRPID: true, sipExtraConfig: null
+      }});
+      var from = g('fromNum').value.replace(/\s/g, '');
+      if (from) { sendCallerCfg(from); }
+      sendReq({ GetSnapshot: [] });
+      g('btnCall').disabled = false;
+      return;
+    }
+    if (msg.ContinueSession) {
+      sessionID = msg.ContinueSession;
+      addLog('Sesion continuada \u2713', 'ok');
+      setStatus('listo', 'pill-ok');
+      sendReq({ GetSnapshot: [] });
+      g('btnCall').disabled = false;
+      return;
+    }
+    if (msg.BCEvent)     { handleCallEvent(msg.BCEvent); return; }
+    if (msg.RequestConf) { return; }
+  }
+
+  function connect() {
+    if (reconnTimer) { clearTimeout(reconnTimer); reconnTimer = null; }
+    if (ws) { try { ws.close(); } catch (e) {} ws = null; }
+
+    if (typeof WebSocket === 'undefined') {
+      addLog('Tu navegador no soporta WebSocket', 'err');
+      setStatus('sin soporte', 'pill-err');
+      return;
+    }
+
+    setStatus('conectando...', '');
+    try { ws = new WebSocket(SERVER); }
+    catch (e) {
+      addLog('Error al conectar: ' + e.message, 'err');
+      setStatus('error', 'pill-err');
+      reconnTimer = setTimeout(connect, 5000);
+      return;
+    }
+
+    ws.onopen = function() {
+      addLog('WebSocket conectado \u2713', 'ok');
+      setStatus('conectado', 'pill-ok');
+    };
+
+    ws.onmessage = onMessage;
+
+    ws.onerror = function() { addLog('Error WebSocket', 'err'); };
+
+    ws.onclose = function(e) {
+      sessionID  = null;
+      callActive = false;
+      g('btnCall').disabled   = true;
+      g('btnHangup').disabled = true;
+      setStatus('desconectado', 'pill-err');
+      setCallState('');
+      addLog('Desconectado (cod.' + (e ? e.code : '?') + '). Reintentando...', 'err');
+      reconnTimer = setTimeout(connect, 5000);
+    };
+  }
+
+  window.makeCall = function() {
+    var from = g('fromNum').value.replace(/\s/g, '');
+    var to   = g('toNum').value.replace(/\s/g, '');
+    if (!from)      { addLog('Ingresa tu numero de telefono (origen)', 'err'); return; }
+    if (!to)        { addLog('Ingresa el numero destino', 'err'); return; }
+    if (!sessionID) { addLog('Sin sesion activa. Espera...', 'err'); return; }
+    sendCallerCfg(from);
+    sendReq({ BCRequest: { MakeCall: { destNum: to, destName: null } } });
+    addLog('Iniciando llamada a ' + to, 'inf');
+    g('btnCall').disabled   = true;
+    g('btnHangup').disabled = false;
+  };
+
+  window.hangup = function() {
+    sendReq({ BCRequest: { Hangup: [] } });
+    addLog('Colgando...', 'inf');
+    callActive = false;
+    g('btnHangup').disabled = true;
+    g('btnCall').disabled   = false;
+    setCallState('');
+    if (sessionID) { setStatus('listo', 'pill-ok'); }
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', connect);
+  } else {
+    connect();
+  }
+
+})();
+</script>
+</body>
+</html>
