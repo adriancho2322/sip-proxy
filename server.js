@@ -51,6 +51,10 @@ function stripQuotes(s) {
   return s;
 }
 
+// Global error handlers
+process.on('uncaughtException', (err) => { console.error('UNCAUGHT:', err.message, err.stack); });
+process.on('unhandledRejection', (err) => { console.error('UNHANDLED:', err.message); });
+
 // ---- WebSocket signaling: JSON API (pares sip) ----
 const wss = new WebSocket.Server({ server, path: '/' });
 
@@ -64,6 +68,7 @@ wss.on('connection', (ws) => {
     try {
       sip.send(req, cb);
     } catch(e) {
+      console.error('safeSipSend error:', e.message);
       sendDebug('Error SIP: ' + e.message);
       if (cb) cb({ status: 500, reason: 'Server error: ' + e.message, headers: {}, content: '' });
     }
@@ -72,6 +77,9 @@ wss.on('connection', (ws) => {
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(Buffer.isBuffer(raw) ? raw.toString() : raw); } catch (e) { return; }
+
+    // Ping test
+    if (msg.action === 'ping') { sendJSON({ type: 'pong' }); return; }
 
     // --- sip_call: send SIP request ---
     if (msg.action === 'sip_call') {
@@ -82,6 +90,7 @@ wss.on('connection', (ws) => {
       const fromUri = 'sip:' + user + '@' + domain;
       const toUri = 'sip:' + number + '@' + domain;
 
+      console.log('sip_call to', number);
       sendDebug('Llamando a ' + number);
 
       function doInvite(authHeader) {

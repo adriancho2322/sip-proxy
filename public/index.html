@@ -152,7 +152,12 @@ async function call(){
   if(!ws||ws.readyState!==WebSocket.OPEN){
     l('Conectando...');
     ws=new WebSocket('wss://'+location.host);
-    ws.onopen=()=>{l('WS conectado ✓','s');connected=true;doCall(user,pass,domain,num)};
+    ws.onopen=()=>{
+      l('WS conectado ✓','s');connected=true;
+      // Test with ping first
+      ws.send(JSON.stringify({action:'ping'}));
+      setTimeout(()=>doCall(user,pass,domain,num),500);
+    };
     ws.onmessage=(ev)=>handleMsg(ev.data);
     ws.onclose=()=>{l('WS desconectado','e');connected=false;cleanup()};
     ws.onerror=()=>l('Error WS','e');
@@ -196,6 +201,7 @@ function handleMsg(raw){
       l('Error: '+m.status+' '+m.reason,'e');
       cleanup();
     }
+    if(m.type==='pong'){l('ping ok','s')}
   }catch(e){l('Parse error:'+e.message,'e')}
 }
 
