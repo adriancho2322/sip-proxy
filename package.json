@@ -7,6 +7,8 @@
   },
   "dependencies": {
     "ffmpeg-static": "^5.3.0",
+    "sip": "^0.0.6",
+    "sip.js": "^0.21.2",
     "ws": "^8.16.0"
   }
 }

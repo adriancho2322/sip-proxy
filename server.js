@@ -3,12 +3,9 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const WebSocket = require('ws');
-const net = require('net');
-const dns = require('dns');
+const sip = require('sip');
 
 const PORT = process.env.PORT || 80;
-const TARGET_HOST = 'webdial.keepcalling.net';
-const TARGET_PORTS = [8080, 5060, 443];
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
 const MIME_TYPES = {
@@ -58,104 +55,163 @@ function serveFile(name, res) {
 
 const wss = new WebSocket.Server({ server });
 
-wss.on('connection', (ws) => {
-  let connected = false;
-  let client = null;
-  let bufQueue = [];
-  let tryIndex = 0;
-  let reconnectTimer = null;
+function rstring() { return Math.floor(Math.random() * 1e12).toString(); }
 
-  function sendDebug(msg) {
+// Iniciar stack SIP global
+let sipStarted = false;
+function ensureSipStack() {
+  if (sipStarted) return;
+  try {
+    sip.start({ tcp: true, udp: false, port: 0 }, function(rq) {
+      sip.send(sip.makeResponse(rq, 404, 'Not Found'));
+    });
+    sipStarted = true;
+    console.log('SIP stack started');
+  } catch (e) {
+    console.error('SIP stack error:', e.message);
+  }
+}
+
+wss.on('connection', (ws) => {
+  let sessionId = null;
+  let sipAccount = null;
+  let dialConfig = null;
+  let callActive = false;
+
+  function sendJSON(obj) {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'debug', msg: msg }));
+      ws.send(JSON.stringify(obj));
     }
   }
 
-  dns.resolve4(TARGET_HOST, (err, addresses) => {
-    const ip = err ? 'error: ' + err.message : addresses.join(', ');
-    console.log('DNS resolve ' + TARGET_HOST + ' -> ' + ip);
-    sendDebug('DNS: ' + TARGET_HOST + ' = ' + ip);
-  });
+  function sendDebug(msg) {
+    sendJSON({ type: 'debug', msg: msg });
+  }
 
-  function tryConnect() {
-    if (connected || tryIndex >= TARGET_PORTS.length) {
-      tryIndex = 0;
+  function sendBCEvent(state) {
+    sendJSON({ BCEvent: state });
+  }
+
+  function sendReqResponse(reqId, data) {
+    sendJSON({ reqID: reqId, reqData: data });
+  }
+
+  sendDebug('Servidor JSON API listo');
+  sendJSON({ HaveSessionQ: true });
+
+  function handleMakeCall(from, to) {
+    sendDebug('Iniciando llamada SIP: ' + from + ' -> ' + to);
+    ensureSipStack();
+
+    const domain = (sipAccount && sipAccount.sipDomain) || 'webdial.keepcalling.net';
+    const user = (sipAccount && sipAccount.sipUserName) || from;
+    const fromUri = 'sip:' + user + '@' + domain;
+    const toUri = 'sip:' + to + '@' + domain;
+    const contactUri = 'sip:' + user + '@' + domain;
+
+    sip.send({
+      method: 'INVITE',
+      uri: toUri,
+      headers: {
+        to: { uri: toUri },
+        from: { uri: fromUri, params: { tag: rstring() } },
+        'call-id': rstring(),
+        cseq: { method: 'INVITE', seq: Math.floor(Math.random() * 1e5) },
+        'content-type': 'application/sdp',
+        contact: [{ uri: contactUri }],
+        'max-forwards': '70'
+      },
+      content: ''
+    }, function(rs) {
+      sendDebug('SIP response: ' + rs.status + ' ' + (rs.reason || ''));
+      if (rs.status >= 200 && rs.status < 300) {
+        sendBCEvent({ Connected: {} });
+        callActive = true;
+        sip.send({
+          method: 'ACK',
+          uri: rs.headers.contact[0].uri,
+          headers: {
+            to: rs.headers.to,
+            from: rs.headers.from,
+            'call-id': rs.headers['call-id'],
+            cseq: { method: 'ACK', seq: rs.headers.cseq.seq },
+            via: []
+          }
+        });
+      } else if (rs.status >= 100 && rs.status < 200) {
+        sendBCEvent({ RingingCallee: {} });
+      } else {
+        sendBCEvent({ NoCall: {} });
+        callActive = false;
+      }
+    });
+  }
+
+  ws.on('message', (raw) => {
+    const str = Buffer.isBuffer(raw) ? raw.toString() : raw;
+    let msg;
+    try { msg = JSON.parse(str); } catch (e) { return; }
+
+    if (msg.type === 'ping') { sendJSON({ type: 'pong' }); return; }
+
+    if (msg.HaveSessionQ) {
+      sendJSON({ ContinueSession: sessionId || 'new-session' });
       return;
     }
 
-    const port = TARGET_PORTS[tryIndex];
-    console.log('Trying ' + TARGET_HOST + ':' + port);
-    sendDebug('Conectando a ' + TARGET_HOST + ':' + port + ' (TCP)...');
+    if (msg.NewSession) {
+      sessionId = 'sess-' + rstring();
+      sendDebug('Sesión iniciada: ' + sessionId);
+      sendJSON({ StartSession: sessionId });
+      return;
+    }
 
-    client = net.connect(port, TARGET_HOST, () => {
-      connected = true;
-      sendDebug('Conectado a ' + TARGET_HOST + ':' + port);
-      console.log('TCP connected to', TARGET_HOST + ':' + port);
+    if (msg.reqData) {
+      const data = msg.reqData;
 
-      // Iniciar handshake con el navegador
-      ws.send(JSON.stringify({ HaveSessionQ: true, reqID: "0" }));
-      console.log('Sent HaveSessionQ to browser');
-
-      for (const msg of bufQueue) {
-        client.write(typeof msg === 'string' ? msg : Buffer.from(msg));
+      if (data.SetSIPAccount) {
+        sipAccount = data.SetSIPAccount;
+        sendDebug('Cuenta SIP configurada: ' + sipAccount.sipUserName);
+        sendReqResponse(msg.reqID, { RequestConf: { type: 'SIPAccount', status: 'ok' } });
+        return;
       }
-      bufQueue = [];
-    });
 
-    client.on('data', (data) => {
-      const str = data.toString();
-      console.log('Target -> Client:', str.substring(0, 120));
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(data);
+      if (data.SetDialConfig) {
+        dialConfig = data.SetDialConfig;
+        sendDebug('Config de llamada: ' + data.SetDialConfig.phoneNum);
+        sendReqResponse(msg.reqID, { RequestConf: { type: 'DialConfig', status: 'ok' } });
+        return;
       }
-    });
 
-    client.on('close', () => {
-      connected = false;
-      console.log('Connection to ' + TARGET_HOST + ':' + port + ' closed');
-      if (tryIndex < TARGET_PORTS.length - 1) {
-        tryIndex++;
-        sendDebug('Puerto ' + port + ' cerrado, probando ' + TARGET_PORTS[tryIndex] + '...');
-        tryConnect();
-      } else {
-        sendDebug('Todos los puertos fallaron, reintentando en 5s...');
-        reconnectTimer = setTimeout(() => { tryIndex = 0; tryConnect(); }, 5000);
+      if (data.GetSnapshot) {
+        sendReqResponse(msg.reqID, { Snapshot: { callActive: callActive } });
+        return;
       }
-    });
 
-    client.on('error', (err) => {
-      connected = false;
-      console.error('Error connecting to', TARGET_HOST + ':' + port, err.message);
-      sendDebug('Error en puerto ' + port + ': ' + err.message);
-      client.destroy();
-    });
-  }
+      if (data.BCRequest && data.BCRequest.MakeCall) {
+        const to = data.BCRequest.MakeCall.destNum;
+        const from = dialConfig ? dialConfig.phoneNum : 'anon';
+        sendBCEvent({ Initiated: {} });
+        handleMakeCall(from, to);
+        return;
+      }
 
-  ws.on('message', (data) => {
-    const msg = Buffer.isBuffer(data) ? data.toString() : data;
-    if (connected && client && !client.destroyed) {
-      client.write(typeof msg === 'string' ? msg : Buffer.from(msg));
-    } else {
-      bufQueue.push(msg);
+      if (data.BCRequest && data.BCRequest.Hangup) {
+        sendDebug('Colgando llamada');
+        sendBCEvent({ NoCall: {} });
+        callActive = false;
+        return;
+      }
+
+      sendReqResponse(msg.reqID, { RequestConf: { status: 'ok' } });
     }
   });
 
   ws.on('close', () => {
-    console.log('Browser WebSocket closed');
-    if (client && !client.destroyed) client.destroy();
-    connected = false;
-    if (reconnectTimer) clearTimeout(reconnectTimer);
+    sendDebug('Cliente desconectado');
   });
-
-  ws.on('error', (err) => {
-    console.error('Browser WS error:', err.message);
-    if (client && !client.destroyed) client.destroy();
-    connected = false;
-  });
-
-  tryConnect();
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server listening on port ${PORT}`);
+  console.log('Server listening on port ' + PORT);
 });
