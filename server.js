@@ -132,7 +132,15 @@ wss.on('connection', (ws) => {
     }
 
     function handleResponse(rs) {
-      sendDebug('SIP response: ' + rs.status + ' ' + (rs.reason || ''));
+      const statusStr = rs.status + ' ' + (rs.reason || '');
+      sendDebug('SIP response: ' + statusStr);
+      // Debug: mostrar headers relevantes
+      const authH = rs.headers['proxy-authenticate'];
+      const wwwAuth = rs.headers['www-authenticate'];
+      const allKeys = Object.keys(rs.headers).join(', ');
+      sendDebug('Headers: ' + allKeys);
+      sendDebug('proxy-auth: ' + (authH ? (typeof authH === 'object' ? JSON.stringify(authH) : authH) : 'none'));
+      sendDebug('www-auth: ' + (wwwAuth ? (typeof wwwAuth === 'object' ? JSON.stringify(wwwAuth) : wwwAuth) : 'none'));
       if (rs.status === 407) {
         sendDebug('Autenticación requerida, enviando credenciales...');
         const req = {
