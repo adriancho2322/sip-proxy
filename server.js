@@ -75,6 +75,12 @@ wss.on('connection', (ws) => {
       const addr = client.remoteAddress || '?';
       console.log('TCP conectado a', TARGET_HOST, addr + ':' + TARGET_PORT);
       ws.send(JSON.stringify({ type: 'debug', msg: 'TCP conectado a ' + TARGET_HOST + ' (' + addr + ')' }));
+
+      // Enviar HaveSessionQ al navegador para iniciar el handshake
+      const handshake = JSON.stringify({ HaveSessionQ: true, reqID: "0" });
+      ws.send(handshake);
+      console.log('-> Enviado HaveSessionQ al navegador');
+
       for (const msg of bufQueue) {
         client.write(typeof msg === 'string' ? msg : Buffer.from(msg));
       }
