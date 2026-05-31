@@ -59,71 +59,152 @@ function serveFile(name, res) {
 const wss = new WebSocket.Server({ server });
 
 wss.on('connection', (ws) => {
-  let tcpConnected = false;
+  let connected = false;
+  let client = null;
+  let bufQueue = [];
 
-  // Resolver DNS para mostrar la IP real
+  // Mostrar resolución DNS
   dns.resolve4(TARGET_HOST, (err, addresses) => {
     const ip = err ? 'error: ' + err.message : addresses.join(', ');
     console.log('DNS resolve ' + TARGET_HOST + ' -> ' + ip);
     ws.send(JSON.stringify({ type: 'debug', msg: 'DNS: ' + TARGET_HOST + ' = ' + ip }));
   });
 
-  const client = net.connect(TARGET_PORT, TARGET_HOST, () => {
-    tcpConnected = true;
-    const addr = client.remoteAddress || '?';
-    console.log('TCP connected to ' + TARGET_HOST + ' (' + addr + '):' + TARGET_PORT);
-    ws.send(JSON.stringify({ type: 'debug', msg: 'TCP conectado a ' + TARGET_HOST + ' (' + addr + ')' }));
-  });
+  function connectToTarget() {
+    // Intentar primero WebSocket
+    const wsUrl = 'ws://' + TARGET_HOST + ':' + TARGET_PORT;
+    console.log('Attempting WS connection to', wsUrl);
+
+    try {
+      client = new WebSocket(wsUrl);
+
+      client.on('open', () => {
+        connected = true;
+        console.log('WS connected to target');
+        ws.send(JSON.stringify({ type: 'debug', msg: 'Conectado a ' + TARGET_HOST + ' vía WebSocket' }));
+        // Enviar mensajes encolados
+        for (const msg of bufQueue) {
+          client.send(msg);
+        }
+        bufQueue = [];
+      });
+
+      client.on('message', (data) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          const raw = typeof data === 'string' ? data : data.toString();
+          console.log('Target -> Client:', raw.substring(0, 120));
+          ws.send(data);
+        }
+      });
+
+      client.on('close', (code, reason) => {
+        console.log('Target WS closed:', code, reason ? reason.toString() : '');
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'debug', msg: 'Conexión con target cerrada (' + code + ')' }));
+          ws.close();
+        }
+      });
+
+      client.on('error', (err) => {
+        console.error('Target WS error:', err.message);
+        ws.send(JSON.stringify({ type: 'debug', msg: 'Error WS target: ' + err.message }));
+        // Fallback a TCP
+        fallbackToTCP();
+      });
+    } catch (e) {
+      console.error('Failed to create WS:', e.message);
+      fallbackToTCP();
+    }
+  }
+
+  function fallbackToTCP() {
+    if (connected) return;
+    console.log('Falling back to TCP...');
+    ws.send(JSON.stringify({ type: 'debug', msg: 'WebSocket directo falló, intentando TCP...' }));
+
+    try {
+      client = net.connect(TARGET_PORT, TARGET_HOST, () => {
+        connected = true;
+        const addr = client.remoteAddress || '?';
+        console.log('TCP connected to', TARGET_HOST, addr + ':' + TARGET_PORT);
+        ws.send(JSON.stringify({ type: 'debug', msg: 'TCP conectado a ' + TARGET_HOST + ' (' + addr + ')' }));
+        for (const msg of bufQueue) {
+          client.write(typeof msg === 'string' ? msg : Buffer.from(msg));
+        }
+        bufQueue = [];
+      });
+
+      client.on('data', (data) => {
+        const str = data.toString();
+        console.log('Target TCP -> Client:', str.substring(0, 120));
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(data);
+        }
+      });
+
+      client.on('close', (hadError) => {
+        console.log('TCP closed, hadError=' + hadError);
+        if (ws.readyState === WebSocket.OPEN) ws.close();
+      });
+
+      client.on('error', (err) => {
+        console.error('TCP error:', err.message);
+        ws.send(JSON.stringify({ type: 'debug', msg: 'Error TCP: ' + err.message }));
+        if (ws.readyState === WebSocket.OPEN) ws.close();
+      });
+    } catch (e) {
+      console.error('TCP connect failed:', e.message);
+      ws.send(JSON.stringify({ type: 'debug', msg: 'Error: ' + e.message }));
+    }
+
+    timeout = setTimeout(() => {
+      if (!connected && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'debug', msg: 'Timeout conectando a ' + TARGET_HOST }));
+        ws.close(1011, 'Timeout');
+      }
+    }, 15000);
+  }
+
+  let timeout = setTimeout(() => {
+    if (!connected && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'debug', msg: 'Timeout conectando a ' + TARGET_HOST }));
+      ws.close(1011, 'Timeout');
+    }
+  }, 15000);
 
   ws.on('message', (data) => {
-    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
-    if (tcpConnected) {
-      client.write(buf);
+    const msg = Buffer.isBuffer(data) ? data.toString() : data;
+    console.log('Client -> Target:', (typeof msg === 'string' ? msg.substring(0, 120) : 'buffer'));
+    if (connected && client) {
+      if (client.readyState === 1) { // WebSocket.OPEN
+        client.send(msg);
+      } else if (client.writable) {
+        client.write(msg);
+      }
     } else {
-      console.log('TCP not ready yet, buffering message');
-    }
-  });
-
-  client.on('data', (data) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(data);
+      bufQueue.push(msg);
     }
   });
 
   ws.on('close', () => {
-    console.log('WebSocket closed');
-    client.destroy();
-  });
-
-  client.on('close', (hadError) => {
-    console.log('TCP closed (hadError=' + hadError + ')');
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.close();
+    console.log('Client WebSocket closed');
+    if (timeout) clearTimeout(timeout);
+    if (client) {
+      if (client.close) client.close();
+      if (client.destroy) client.destroy();
     }
   });
 
   ws.on('error', (err) => {
-    console.error('WebSocket error:', err.message);
-    client.destroy();
-  });
-
-  client.on('error', (err) => {
-    console.error('TCP error connecting to', TARGET_HOST + ':' + TARGET_PORT, err.message);
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'debug', msg: 'Error TCP: ' + err.message }));
-      ws.close(1011, 'TCP error: ' + err.message);
+    console.error('Client WS error:', err.message);
+    if (client) {
+      if (client.close) client.close();
+      if (client.destroy) client.destroy();
     }
   });
 
-  // Timeout si TCP no conecta en 15s
-  setTimeout(() => {
-    if (!tcpConnected && ws.readyState === WebSocket.OPEN) {
-      const msg = 'Timeout conectando a ' + TARGET_HOST + ':' + TARGET_PORT;
-      console.error(msg);
-      ws.send(JSON.stringify({ type: 'debug', msg: msg }));
-      ws.close(1011, msg);
-    }
-  }, 15000);
+  // Iniciar conexión
+  connectToTarget();
 });
 
 server.listen(PORT, '0.0.0.0', () => {
