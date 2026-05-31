@@ -3,6 +3,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const net = require('net');
+const dgram = require('dgram');
 const WebSocket = require('ws');
 const crypto = require('crypto');
 
@@ -18,11 +19,30 @@ const MIME_TYPES = {
   '.ico': 'image/x-icon',
 };
 
+function testUdp(callback) {
+  const sock = dgram.createSocket('udp4');
+  let result = 'ok';
+  sock.on('error', (err) => { result = 'error: ' + err.message; });
+  sock.bind(0, '0.0.0.0', () => {
+    const addr = sock.address();
+    const msg = Buffer.from('test');
+    // Send a test packet to 8.8.8.8:53 (DNS, just to test send)
+    sock.send(msg, 0, msg.length, 53, '8.8.8.8', (err) => {
+      if (err) result = 'send error: ' + err.message;
+      sock.close();
+      callback(result + ' bound=' + addr.address + ':' + addr.port);
+    });
+  });
+  setTimeout(() => { try { sock.close(); } catch(e) {} if (result === 'ok') result = 'timeout'; callback(result); }, 5000);
+}
+
 const server = http.createServer((req, res) => {
   if (req.url === '/') {
     serveFile('index.html', res);
   } else if (req.url === '/jssip.js') {
     serveFile('jssip.js', res);
+  } else if (req.url === '/testudp') {
+    testUdp((r) => { res.writeHead(200); res.end('UDP test: ' + r); });
   } else {
     res.writeHead(404);
     res.end('Not found');
