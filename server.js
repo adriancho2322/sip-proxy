@@ -55,28 +55,93 @@ function stripQuotes(s) {
 process.on('uncaughtException', (err) => { console.error('UNCAUGHT:', err.message, err.stack); });
 process.on('unhandledRejection', (err) => { console.error('UNHANDLED:', err.message); });
 
-// ---- WebSocket signaling: JSON API (pares sip) ----
-const wss = new WebSocket.Server({ server, path: '/' });
+// ---- WebSocket único: señalización + audio ----
+const wss = new WebSocket.Server({ server });
 
 wss.on('connection', (ws) => {
   let pendingAuth = null;
+  let audioRelay = null;
+  let pcmInputBuffer = Buffer.alloc(0);
+  let pcmOutputBuffer = Buffer.alloc(0);
 
   function sendJSON(obj) { try { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); } catch(e) {} }
   function sendDebug(msg) { sendJSON({ type: 'debug', msg: String(msg) }); }
 
   function safeSipSend(req, cb) {
-    try {
-      sip.send(req, cb);
-    } catch(e) {
+    try { sip.send(req, cb); }
+    catch(e) {
       console.error('safeSipSend error:', e.message);
       sendDebug('Error SIP: ' + e.message);
       if (cb) cb({ status: 500, reason: 'Server error: ' + e.message, headers: {}, content: '' });
     }
   }
 
+  // ---- Audio relay ----
+  function startAudioRelay(info) {
+    stopAudioRelay();
+    const sock = dgram.createSocket('udp4');
+    sock.on('error', (e) => console.error('RTP error:', e.message));
+    sock.on('message', (msg) => {
+      if (msg.length < 12) return;
+      const pt = msg.readUInt8(1) & 0x7f;
+      if (pt !== 8 && pt !== 0) return;
+      const payload = msg.subarray(12);
+      const pcm16 = Buffer.alloc(payload.length * 2);
+      for (let i = 0; i < payload.length; i++) pcm16.writeInt16LE(alawToLinear(payload[i]), i * 2);
+      pcmOutputBuffer = Buffer.concat([pcmOutputBuffer, pcm16]);
+      while (pcmOutputBuffer.length >= 192) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(pcmOutputBuffer.subarray(0, 192));
+        pcmOutputBuffer = pcmOutputBuffer.subarray(192);
+      }
+    });
+    sock.bind(0, '0.0.0.0', () => {
+      const addr = sock.address();
+      console.log('RTP relay port', addr.port);
+      audioRelay = { sock, rtpIp: info.rtpIp, rtpPort: info.rtpPort, ssrc: info.ssrc || Math.floor(Math.random() * 0xFFFFFFFF), seq: 0, ts: 0 };
+      sendJSON({ type: 'relay_ready', localPort: addr.port });
+    });
+  }
+
+  function stopAudioRelay() {
+    if (audioRelay && audioRelay.sock) { try { audioRelay.sock.close(); } catch(e) {} }
+    audioRelay = null; pcmInputBuffer = Buffer.alloc(0); pcmOutputBuffer = Buffer.alloc(0);
+  }
+
+  function handleAudioData(raw) {
+    if (!audioRelay) return;
+    pcmInputBuffer = Buffer.concat([pcmInputBuffer, Buffer.from(raw)]);
+    const targetSamples = 960;
+    while (pcmInputBuffer.length >= targetSamples * 2) {
+      const packet = pcmInputBuffer.subarray(0, targetSamples * 2);
+      pcmInputBuffer = pcmInputBuffer.subarray(targetSamples * 2);
+      const pcma = Buffer.alloc(160);
+      for (let i = 0; i < 160; i++) pcma[i] = linearToAlaw(packet.readInt16LE(i * 12));
+      const rtp = Buffer.alloc(12 + 160);
+      rtp[0] = 0x80; rtp[1] = 0x88;
+      rtp.writeUInt16BE(audioRelay.seq, 2);
+      rtp.writeUInt32BE(audioRelay.ts, 4);
+      rtp.writeUInt32BE(audioRelay.ssrc, 8);
+      pcma.copy(rtp, 12);
+      audioRelay.seq = (audioRelay.seq + 1) & 0xFFFF;
+      audioRelay.ts += 160;
+      audioRelay.sock.send(rtp, 0, rtp.length, audioRelay.rtpPort, audioRelay.rtpIp, (e) => {
+        if (e) console.error('RTP send:', e.message);
+      });
+    }
+  }
+
   ws.on('message', (raw) => {
+    // Binary = audio PCM data
+    if (typeof raw !== 'string' && !(raw instanceof String)) {
+      handleAudioData(raw);
+      return;
+    }
     let msg;
     try { msg = JSON.parse(Buffer.isBuffer(raw) ? raw.toString() : raw); } catch (e) { return; }
+
+    // Audio relay commands
+    if (msg.type === 'start') { startAudioRelay(msg); return; }
+    if (msg.type === 'stop') { stopAudioRelay(); return; }
 
     // Ping test
     if (msg.action === 'ping') { sendJSON({ type: 'pong' }); return; }
@@ -139,17 +204,12 @@ wss.on('connection', (ws) => {
               sendDebug('Autenticando...');
               doInvite(challenge);
             } else {
-              // Just return the auth challenge
-              sendSipResponse(reqId, 407, (rs.content || ''), {
-                proxy_authenticate: challenge,
-                'call-id': rs.headers['call-id'] ? (Array.isArray(rs.headers['call-id']) ? rs.headers['call-id'][0] : rs.headers['call-id']) : '',
-                'cseq': rs.headers['cseq'] ? (Array.isArray(rs.headers['cseq']) ? rs.headers['cseq'][0] : rs.headers['cseq']) : '',
-                'from': rs.headers['from'] ? (Array.isArray(rs.headers['from']) ? rs.headers['from'][0] : rs.headers['from']) : '',
-                'to': rs.headers['to'] ? (Array.isArray(rs.headers['to']) ? rs.headers['to'][0] : rs.headers['to']) : '',
-              });
-              sendSipResponse(reqId, 407, (rs.content || ''), {
-                proxy_authenticate: JSON.stringify(Array.isArray(challenges) ? challenges : [challenges]),
-              });
+              sendJSON({ type: 'auth_challenge', reqId, challenge: {
+                realm: stripQuotes(challenge.realm) || domain,
+                nonce: stripQuotes(challenge.nonce) || '',
+                username: user,
+                uri: toUri,
+              }});
             }
           }
           return;
@@ -279,7 +339,7 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('close', () => {});
+  ws.on('close', () => { stopAudioRelay(); });
 });
 
 function stringifyHeader(h) {
@@ -298,9 +358,7 @@ function parseHeader(str) {
   return { uri, params };
 }
 
-// ---- Audio WebSocket (PCM16 <-> RTP/UDP bridge) ----
-const audioServer = new WebSocket.Server({ server, path: '/audio' });
-
+// Linear to A-law conversion
 function linearToAlaw(sample) {
   if (sample >= 0) {
     if (sample > 0x7fff) sample = 0x7fff;
@@ -315,86 +373,13 @@ function linearToAlaw(sample) {
   return ((seg << 4) | ((sample >> (seg >= 4 ? seg - 4 : 0)) & 0x0f)) ^ 0x55;
 }
 
-audioServer.on('connection', (ws) => {
-  let relay = null;
-  let pcmInputBuffer = Buffer.alloc(0);
-  let pcmOutputBuffer = Buffer.alloc(0);
-
-  function startRelay(info) {
-    stopRelay();
-    const sock = dgram.createSocket('udp4');
-    sock.on('error', (e) => console.error('RTP error:', e.message));
-    sock.on('message', (msg) => {
-      if (msg.length < 12) return;
-      const pt = msg.readUInt8(1) & 0x7f;
-      if (pt !== 8 && pt !== 0) return;
-      const payload = msg.subarray(12);
-      const pcm16 = Buffer.alloc(payload.length * 2);
-      for (let i = 0; i < payload.length; i++) {
-        const alaw = payload[i] ^ 0xD5;
-        const sign = (alaw & 0x80) ? -1 : 1;
-        const exponent = (alaw >> 4) & 0x07;
-        const mantissa = alaw & 0x0f;
-        let s = sign * ((exponent === 0 ? mantissa : ((mantissa << 3) | 0x84)) << (exponent + 4));
-        pcm16.writeInt16LE(s, i * 2);
-      }
-      pcmOutputBuffer = Buffer.concat([pcmOutputBuffer, pcm16]);
-      while (pcmOutputBuffer.length >= 192) {
-        if (ws.readyState === WebSocket.OPEN) ws.send(pcmOutputBuffer.subarray(0, 192));
-        pcmOutputBuffer = pcmOutputBuffer.subarray(192);
-      }
-    });
-    sock.bind(0, '0.0.0.0', () => {
-      const addr = sock.address();
-      console.log('RTP relay port', addr.port);
-      relay = {
-        sock, rtpIp: info.rtpIp, rtpPort: info.rtpPort,
-        ssrc: info.ssrc || Math.floor(Math.random() * 0xFFFFFFFF),
-        seq: 0, ts: 0,
-      };
-      ws.send(JSON.stringify({ type: 'relay_ready', localPort: addr.port }));
-    });
-  }
-
-  function stopRelay() {
-    if (relay && relay.sock) { try { relay.sock.close(); } catch(e) {} }
-    relay = null; pcmInputBuffer = Buffer.alloc(0);
-  }
-
-  ws.on('message', (raw) => {
-    if (typeof raw === 'string') {
-      try {
-        const msg = JSON.parse(raw);
-        if (msg.type === 'start') startRelay(msg);
-        else if (msg.type === 'stop') stopRelay();
-      } catch(e) {}
-      return;
-    }
-    if (!relay) return;
-    pcmInputBuffer = Buffer.concat([pcmInputBuffer, Buffer.from(raw)]);
-    const targetSamples = 960; // 20ms @ 48kHz -> 160 PCMA @ 8kHz
-    while (pcmInputBuffer.length >= targetSamples * 2) {
-      const packet = pcmInputBuffer.subarray(0, targetSamples * 2);
-      pcmInputBuffer = pcmInputBuffer.subarray(targetSamples * 2);
-      const pcma = Buffer.alloc(160);
-      for (let i = 0; i < 160; i++) pcma[i] = linearToAlaw(packet.readInt16LE(i * 12));
-      const rtp = Buffer.alloc(12 + 160);
-      rtp[0] = 0x80; rtp[1] = 0x88;
-      rtp.writeUInt16BE(relay.seq, 2);
-      rtp.writeUInt32BE(relay.ts, 4);
-      rtp.writeUInt32BE(relay.ssrc, 8);
-      pcma.copy(rtp, 12);
-      relay.seq = (relay.seq + 1) & 0xFFFF;
-      relay.ts += 160;
-      relay.sock.send(rtp, 0, rtp.length, relay.rtpPort, relay.rtpIp, (e) => {
-        if (e) console.error('RTP send error:', e.message);
-      });
-    }
-  });
-
-  ws.on('close', () => stopRelay());
-  ws.on('error', () => stopRelay());
-});
+function alawToLinear(alaw) {
+  const a = alaw ^ 0xD5;
+  const sign = (a & 0x80) ? -1 : 1;
+  const exponent = (a >> 4) & 0x07;
+  const mantissa = a & 0x0f;
+  return sign * ((exponent === 0 ? mantissa : ((mantissa << 3) | 0x84)) << (exponent + 4));
+}
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log('Server on port ' + PORT);

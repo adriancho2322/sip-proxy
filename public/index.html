@@ -39,7 +39,7 @@ button{padding:12px 24px;border-radius:8px;border:none;font-size:1rem;cursor:poi
 <div class="card"><div id="s">Listo</div></div>
 
 <script>
-let ws = null, audioWs = null, callActive = false, connected = false;
+let ws = null, callActive = false, connected = false;
 let audioCtx = null, micStream = null, micProc = null, outNode = null, playQ = [];
 
 function l(m,c){const e=document.getElementById('s');e.innerHTML+='<span class="'+(c||'i')+'">› </span>'+m+'\n';e.scrollTop=e.scrollHeight}
@@ -67,28 +67,13 @@ function parseSdpAddr(sdp){
 }
 
 function startAudioRelay(rtpIp,rtpPort){
-  audioWs=new WebSocket('wss://'+location.host+'/audio');
-  audioWs.onopen=()=>{
-    l('Audio WS conectado','s');
-    audioWs.send(JSON.stringify({type:'start',rtpIp,rtpPort}));
-    startMic();
-  };
-  audioWs.onmessage=(ev)=>{
-    if(typeof ev.data==='string'){
-      try{const m=JSON.parse(ev.data);if(m.type==='relay_ready')l('Relay listo','s')}catch(e){}
-      return;
-    }
-    playPcm(ev.data);
-  };
-  audioWs.onclose=()=>l('Audio WS cerrado');
-  audioWs.onerror=()=>l('Error audio WS','e');
+  ws.send(JSON.stringify({type:'start',rtpIp,rtpPort}));
+  startMic();
+  l('Iniciando relay audio...');
 }
 
 function stopAudioRelay(){
-  if(audioWs&&audioWs.readyState===WebSocket.OPEN){
-    audioWs.send(JSON.stringify({type:'stop'}));
-    audioWs.close();
-  }
+  if(ws&&ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({type:'stop'}));
   stopMic();
 }
 
@@ -107,7 +92,7 @@ function startMic(){
           if(v>32767)v=32767;else if(v<-32768)v=-32768;
           pcm[i]=v;
         }
-        if(audioWs&&audioWs.readyState===WebSocket.OPEN)audioWs.send(pcm.buffer);
+        if(ws&&ws.readyState===WebSocket.OPEN)ws.send(pcm.buffer);
       };
       src.connect(micProc);
       micProc.connect(audioCtx.destination);
@@ -158,7 +143,10 @@ async function call(){
       ws.send(JSON.stringify({action:'ping'}));
       setTimeout(()=>doCall(user,pass,domain,num),500);
     };
-    ws.onmessage=(ev)=>handleMsg(ev.data);
+    ws.onmessage=(ev)=>{
+      if(typeof ev.data==='string')handleMsg(ev.data);
+      else playPcm(ev.data);
+    };
     ws.onclose=()=>{l('WS desconectado','e');connected=false;cleanup()};
     ws.onerror=()=>l('Error WS','e');
   }else{
@@ -177,6 +165,7 @@ function doCall(user,pass,domain,num){
 function handleMsg(raw){
   try{
     const m=JSON.parse(raw);
+    if(m.type==='relay_ready'){l('Relay listo (puerto '+m.localPort+')','s');return}
     if(m.type==='debug'){l(m.msg);return}
     if(m.type==='sip_response'&&m.status===407){
       // First response without auth - server handles it internally
