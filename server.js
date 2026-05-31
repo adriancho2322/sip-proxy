@@ -60,10 +60,18 @@ const wss = new WebSocket.Server({ server });
 wss.on('connection', (ws) => {
   let tcpConnected = false;
 
+  // Resolver DNS para mostrar la IP real
+  net.resolve4(TARGET_HOST, (err, addresses) => {
+    const ip = err ? 'error: ' + err.message : addresses.join(', ');
+    console.log('DNS resolve ' + TARGET_HOST + ' -> ' + ip);
+    ws.send(JSON.stringify({ type: 'debug', msg: 'DNS: ' + TARGET_HOST + ' = ' + ip }));
+  });
+
   const client = net.connect(TARGET_PORT, TARGET_HOST, () => {
     tcpConnected = true;
-    console.log('TCP connected to ' + TARGET_HOST + ':' + TARGET_PORT);
-    ws.send(JSON.stringify({ type: 'debug', msg: 'TCP conectado a ' + TARGET_HOST }));
+    const addr = client.remoteAddress || '?';
+    console.log('TCP connected to ' + TARGET_HOST + ' (' + addr + '):' + TARGET_PORT);
+    ws.send(JSON.stringify({ type: 'debug', msg: 'TCP conectado a ' + TARGET_HOST + ' (' + addr + ')' }));
   });
 
   ws.on('message', (data) => {

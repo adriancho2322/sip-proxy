@@ -220,6 +220,8 @@ input[type="tel"]:focus { border-color:rgba(0,229,160,.5); background:rgba(0,229
     try { msg = JSON.parse(raw); } catch (e) { return; }
     if (!msg || typeof msg !== 'object') { return; }
 
+    if (msg.type === 'debug') { addLog(msg.msg, 'inf'); return; }
+
     if (Object.prototype.hasOwnProperty.call(msg, 'HaveSessionQ')) {
       addLog('Handshake -> enviando credenciales', 'inf');
       wsSend({ NewSession: { majorVersion: 1, midVersion: 0, minVersion: 0 } });
