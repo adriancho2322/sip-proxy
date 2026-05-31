@@ -32,10 +32,17 @@ function serveFile(name, res) {
 }
 
 // SIP stack (shared)
-sip.start({ tcp: true, udp: false, port: 0 }, function(rq) {
-  sip.send(sip.makeResponse(rq, 404, 'Not Found'));
-});
-console.log('SIP stack started');
+let sipReady = false;
+try {
+  sip.start({ tcp: true, udp: false, port: 0 }, function(rq) {
+    if (!sipReady) return;
+    try { sip.send(sip.makeResponse(rq, 404, 'Not Found')); } catch(e) {}
+  });
+  sipReady = true;
+  console.log('SIP stack started');
+} catch(e) {
+  console.error('SIP stack error:', e.message);
+}
 
 function rstring() { return Math.floor(Math.random() * 1e12).toString(); }
 
@@ -45,7 +52,7 @@ function stripQuotes(s) {
 }
 
 // ---- WebSocket signaling: JSON API (pares sip) ----
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocket.Server({ server, path: '/' });
 
 wss.on('connection', (ws) => {
   let pendingAuth = null;
