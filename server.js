@@ -59,6 +59,7 @@ process.on('unhandledRejection', (err) => { console.error('UNHANDLED:', err.mess
 const wss = new WebSocket.Server({ server });
 
 wss.on('connection', (ws) => {
+  console.log('WS connected');
   let pendingAuth = null;
   let audioRelay = null;
   let pcmInputBuffer = Buffer.alloc(0);
@@ -339,7 +340,11 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('close', () => { stopAudioRelay(); });
+  ws.on('error', (e) => console.error('WS error:', e.message));
+  ws.on('close', (code, reason) => {
+    console.log('WS disconnected code=' + code + ' reason=' + (reason || 'none'));
+    stopAudioRelay();
+  });
 });
 
 function stringifyHeader(h) {
