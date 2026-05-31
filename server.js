@@ -8,7 +8,7 @@ const dns = require('dns');
 
 const PORT = process.env.PORT || 80;
 const TARGET_HOST = 'webdial.keepcalling.net';
-const TARGET_PORTS = [8080, 443, 5060];
+const TARGET_PORTS = [8080, 5060, 443];
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
 const MIME_TYPES = {
