@@ -2,6 +2,7 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const WebSocket = require('ws');
 const sip = require('sip');
 const digest = require('sip/digest');
@@ -143,9 +144,42 @@ wss.on('connection', (ws) => {
       sendDebug('www-auth: ' + (wwwAuth ? (typeof wwwAuth === 'object' ? JSON.stringify(wwwAuth) : wwwAuth) : 'none'));
       if (rs.status === 407) {
         sendDebug('Autenticación requerida, enviando credenciales...');
+
+        // Obtener el challenge del header proxy-authenticate
+        const challenges = rs.headers['proxy-authenticate'];
+        const challenge = Array.isArray(challenges) ? challenges[0] : challenges;
+        if (!challenge) {
+          sendDebug('No se encontró challenge de autenticación');
+          sendBCEvent({ NoCall: {} });
+          return;
+        }
+
+        // Extraer parámetros (la librería ya los parsea, pero pueden tener comillas)
+        function stripQuotes(s) {
+          if (typeof s === 'string' && s.length >= 2 && s[0] === '"' && s[s.length - 1] === '"')
+            return s.slice(1, -1);
+          return s;
+        }
+
+        const realm = stripQuotes(challenge.realm);
+        const nonce = stripQuotes(challenge.nonce);
+        const algorithm = stripQuotes(challenge.algorithm) || 'MD5';
+        const opaque = stripQuotes(challenge.opaque);
+        const uriStr = toUri;
+
+        // Calcular digest RFC 2069 (sin qop)
+        // HA1 = MD5(user:realm:password)
+        const ha1 = crypto.createHash('md5').update(user + ':' + realm + ':' + pass).digest('hex');
+        // HA2 = MD5(method:uri)
+        const ha2 = crypto.createHash('md5').update('INVITE' + ':' + uriStr).digest('hex');
+        // response = MD5(HA1:nonce:HA2)
+        const response = crypto.createHash('md5').update(ha1 + ':' + nonce + ':' + ha2).digest('hex');
+
+        sendDebug('Digest realm=' + realm + ' nonce=' + nonce);
+
         const req = {
           method: 'INVITE',
-          uri: toUri,
+          uri: uriStr,
           headers: {
             to: { uri: toUri },
             from: { uri: fromUri, params: { tag: rstring() } },
@@ -153,46 +187,45 @@ wss.on('connection', (ws) => {
             cseq: { method: 'INVITE', seq: Math.floor(Math.random() * 1e5) },
             'content-type': 'application/sdp',
             contact: [{ uri: contactUri }],
-            'max-forwards': '70'
+            'max-forwards': '70',
+            'proxy-authorization': [{
+              scheme: 'Digest',
+              username: user,
+              realm: realm,
+              nonce: nonce,
+              uri: uriStr,
+              algorithm: algorithm,
+              response: response,
+              opaque: opaque || undefined
+            }]
           },
           content: ''
         };
-        authSession = {};
-        const signedReq = digest.signRequest(
-          authSession,
-          req,
-          rs,
-          { user: user, password: pass }
-        );
-        if (signedReq) {
-          sip.send(signedReq, function(rs2) {
-            sendDebug('SIP auth response: ' + rs2.status + ' ' + (rs2.reason || ''));
-            if (rs2.status >= 200 && rs2.status < 300) {
-              sendBCEvent({ Connected: {} });
-              callActive = true;
-              sip.send({
-                method: 'ACK',
-                uri: rs2.headers.contact[0].uri,
-                headers: {
-                  to: rs2.headers.to,
-                  from: rs2.headers.from,
-                  'call-id': rs2.headers['call-id'],
-                  cseq: { method: 'ACK', seq: rs2.headers.cseq.seq },
-                  via: []
-                }
-              });
-            } else if (rs2.status >= 100 && rs2.status < 200) {
-              sendBCEvent({ RingingCallee: {} });
-            } else {
-              sendBCEvent({ NoCall: {} });
-              callActive = false;
-              sendDebug('Llamada falló: ' + rs2.status + ' ' + (rs2.reason || ''));
-            }
-          });
-        } else {
-          sendDebug('Error firmando request de autenticación');
-          sendBCEvent({ NoCall: {} });
-        }
+
+        sip.send(req, function(rs2) {
+          sendDebug('SIP auth response: ' + rs2.status + ' ' + (rs2.reason || ''));
+          if (rs2.status >= 200 && rs2.status < 300) {
+            sendBCEvent({ Connected: {} });
+            callActive = true;
+            sip.send({
+              method: 'ACK',
+              uri: rs2.headers.contact[0].uri,
+              headers: {
+                to: rs2.headers.to,
+                from: rs2.headers.from,
+                'call-id': rs2.headers['call-id'],
+                cseq: { method: 'ACK', seq: rs2.headers.cseq.seq },
+                via: []
+              }
+            });
+          } else if (rs2.status >= 100 && rs2.status < 200) {
+            sendBCEvent({ RingingCallee: {} });
+          } else {
+            sendBCEvent({ NoCall: {} });
+            callActive = false;
+            sendDebug('Llamada falló: ' + rs2.status + ' ' + (rs2.reason || ''));
+          }
+        });
         return;
       }
       if (rs.status >= 200 && rs.status < 300) {
