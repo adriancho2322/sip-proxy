@@ -83,7 +83,7 @@ wss.on('connection', (ws) => {
       if (cb) cb(rs);
     };
     try {
-      console.log('SIP send ' + req.method + ' ' + req.uri);
+      sendDebug('SIP enviando ' + req.method + ' ' + req.uri);
       sip.send(req, wrappedCb);
     } catch(e) {
       if (done) return;
