@@ -2,464 +2,216 @@
 <html>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SIP Caller</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/blueimp-md5/2.19.0/js/md5.min.js"></script>
 <style>
-* { margin:0; padding:0; box-sizing:border-box; }
-body { font-family:system-ui,sans-serif; background:#111; color:#eee; padding:20px; max-width:480px; margin:auto; }
-h1 { font-size:1.3rem; margin-bottom:16px; color:#0af; }
-.card { background:#1a1a2e; border-radius:12px; padding:16px; margin-bottom:16px; }
-label { display:block; font-size:0.8rem; color:#888; margin:10px 0 4px; }
-input { width:100%; padding:10px; border-radius:8px; border:1px solid #333; background:#222; color:#eee; font-size:1rem; }
-button { padding:12px 24px; border-radius:8px; border:none; font-size:1rem; cursor:pointer; font-weight:600; margin:4px; }
-.btn-primary { background:#0a4; color:#fff; width:100%; }
-.btn-primary:disabled { background:#333; color:#666; }
-.btn-danger { background:#c33; color:#fff; }
-.btn-danger:disabled { background:#333; color:#666; }
-#status { background:#0a0a1a; border-radius:8px; padding:12px; font-size:0.8rem; font-family:monospace; max-height:200px; overflow-y:auto; white-space:pre-wrap; color:#0f0; }
-#callerId { color:#ffa; font-size:1rem; margin:8px 0; }
-.e { color:#f44; }
-.i { color:#4af; }
-.s { color:#0a4; }
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,sans-serif;background:#111;color:#eee;padding:20px;max-width:480px;margin:auto}
+h1{font-size:1.3rem;margin-bottom:16px;color:#0af}
+.card{background:#1a1a2e;border-radius:12px;padding:16px;margin-bottom:16px}
+label{display:block;font-size:.8rem;color:#888;margin:10px 0 4px}
+input{width:100%;padding:10px;border-radius:8px;border:1px solid #333;background:#222;color:#eee;font-size:1rem}
+button{padding:12px 24px;border-radius:8px;border:none;font-size:1rem;cursor:pointer;font-weight:600;margin:4px}
+.btn-primary{background:#0a4;color:#fff;width:100%}
+.btn-primary:disabled{background:#333;color:#666}
+.btn-danger{background:#c33;color:#fff}
+.btn-danger:disabled{background:#333;color:#666}
+#s{background:#0a0a1a;border-radius:8px;padding:12px;font-size:.8rem;font-family:monospace;max-height:200px;overflow-y:auto;white-space:pre-wrap;color:#0f0}
+.e{color:#f44}.i{color:#4af}.s{color:#0a4}
 </style>
 </head>
 <body>
 <h1>☎ SIP Caller</h1>
 <div class="card">
-  <label>WS Proxy</label>
-  <input id="wsUrl" value="wss://sip-proxy.onrender.com/ws">
   <label>Usuario SIP</label>
-  <input id="sipUser" value="wes5169805709">
-  <label>Password SIP</label>
-  <input id="sipPass" type="password" value="138e587867f90ba6c5c5fb9c16b73cc3">
-  <label>Dominio SIP</label>
-  <input id="sipDomain" value="webdial.keepcalling.net">
-  <button class="btn-primary" id="btnConnect" onclick="connect()">Conectar</button>
-</div>
-<div class="card" id="callCard" style="display:none">
+  <input id="su" value="wes5169805709">
+  <label>Password</label>
+  <input id="sp" type="password" value="138e587867f90ba6c5c5fb9c16b73cc3">
+  <label>Dominio</label>
+  <input id="sd" value="webdial.keepcalling.net">
   <label>Número a llamar</label>
-  <input id="destNum" placeholder="Ej: 576028998200">
-  <div style="margin-top:10px;">
-    <button class="btn-primary" id="btnCall" onclick="makeCall()">📞 Llamar</button>
-    <button class="btn-danger" id="btnHangup" onclick="hangup()" disabled>Colgar</button>
+  <input id="dn" placeholder="Ej: 576028998200">
+  <div style="margin-top:10px">
+    <button class="btn-primary" id="bc" onclick="call()">📞 Llamar</button>
+    <button class="btn-danger" id="bh" onclick="hangup()" disabled>Colgar</button>
   </div>
-  <div id="callerId"></div>
 </div>
-<div class="card">
-  <div id="status">Listo</div>
-</div>
+<div class="card"><div id="s">Listo</div></div>
 
 <script>
-// ---- State ----
-let sipWs = null;
-let audioWs = null;
-let audioCtx = null;
-let micStream = null;
-let micProcessor = null;
-let registered = false;
-let callActive = false;
-let currentCallId = null;
-let currentFromTag = null;
-let dialog = {};
-let rtpTarget = null; // {ip, port} from SDP
+let ws = null, audioWs = null, callActive = false, connected = false;
+let audioCtx = null, micStream = null, micProc = null, outNode = null, playQ = [];
 
-function log(msg, cls) {
-  const el = document.getElementById('status');
-  el.innerHTML += '<span class="' + (cls||'i') + '">› </span>' + msg + '\n';
-  el.scrollTop = el.scrollHeight;
+function l(m,c){const e=document.getElementById('s');e.innerHTML+='<span class="'+(c||'i')+'">› </span>'+m+'\n';e.scrollTop=e.scrollHeight}
+function g(i){return document.getElementById(i).value.trim()}
+function r(){return Math.random().toString(16).slice(2)}
+
+function logHeaders(h){
+  if(!h)return'';
+  let s='';
+  if(h.to)s+='\n  To: '+h.to;
+  if(h.from)s+='\n  From: '+h.from;
+  if(h['call-id'])s+='\n  Call-ID: '+h['call-id'];
+  if(h.cseq)s+='\n  CSeq: '+h.cseq;
+  if(h.contact)s+='\n  Contact: '+h.contact;
+  return s;
 }
-function getVal(id) { return document.getElementById(id).value.trim(); }
 
-// ---- Util ----
-function makeBranch() { return 'z9hG4bK' + Math.random().toString(16).slice(2,14); }
-function makeTag() { return Math.random().toString(16).slice(2,14); }
-function makeCallId() { return Math.random().toString(16).slice(2,18) + '@browser'; }
-
-function parseSipResponse(msg) {
-  const lines = msg.split('\r\n');
-  const sl = lines[0];
-  const sp1 = sl.indexOf(' '), sp2 = sl.lastIndexOf(' ');
-  const status = parseInt(sl.slice(sp1+1, sp2), 10);
-  const reason = sl.slice(sp2+1);
-  const headers = {};
-  let i = 1;
-  while (i < lines.length && lines[i] !== '') {
-    const colon = lines[i].indexOf(':');
-    if (colon !== -1) {
-      const name = lines[i].slice(0, colon).toLowerCase();
-      const value = lines[i].slice(colon+1).trim();
-      headers[name] = value;
-    }
-    i++;
+function parseSdpAddr(sdp){
+  let ip=null,port=null;
+  for(const ln of sdp.split('\r\n')){
+    if(ln.startsWith('c=IN IP4 '))ip=ln.slice(9);
+    else if(ln.startsWith('m=audio ')){const p=ln.split(' ');port=parseInt(p[1],10)}
   }
-  const bs = msg.indexOf('\r\n\r\n') + 4;
-  const body = bs < msg.length ? msg.slice(bs) : '';
-  return { status, reason, headers, body };
+  return ip&&port?{ip,port}:null;
 }
 
-function createSipMessage(method, uri, headers, body) {
-  let msg = method + ' ' + uri + ' SIP/2.0\r\n';
-  for (const [name, value] of Object.entries(headers)) {
-    if (Array.isArray(value)) { for (const v of value) msg += name + ': ' + v + '\r\n'; }
-    else { msg += name + ': ' + value + '\r\n'; }
-  }
-  const enc = new TextEncoder();
-  msg += 'Content-Length: ' + (body ? enc.encode(body).length : 0) + '\r\n\r\n';
-  if (body) msg += body;
-  return msg;
-}
-
-function md5digest(method, uri, user, realm, pass, nonce) {
-  return md5(md5(user+':'+realm+':'+pass) + ':' + nonce + ':' + md5(method+':'+uri));
-}
-
-function parseAuthHeader(value) {
-  const obj = {};
-  if (!value) return obj;
-  for (const part of value.split(/[,\s]+/)) {
-    const eq = part.indexOf('=');
-    if (eq === -1) continue;
-    let key = part.slice(0, eq).trim().toLowerCase();
-    let val = part.slice(eq+1).trim();
-    if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1,-1);
-    obj[key] = val;
-  }
-  return obj;
-}
-
-function parseSdp(sdp) {
-  const result = { ip: null, port: null, pt: null };
-  for (const line of sdp.split('\r\n')) {
-    if (line.startsWith('c=IN IP4 ')) result.ip = line.slice(9);
-    else if (line.startsWith('m=audio ')) {
-      const parts = line.split(' ');
-      result.port = parseInt(parts[1], 10);
-      result.pt = parts[3]; // first payload type
-    }
-  }
-  return result;
-}
-
-// ---- SIP functions ----
-function sendSip(msg) {
-  if (!sipWs || sipWs.readyState !== WebSocket.OPEN) { log('WS no conectado','e'); return false; }
-  sipWs.send(msg);
-  log('→ ' + msg.split('\r\n')[0]);
-  return true;
-}
-
-function doRegister() {
-  const user = getVal('sipUser'), domain = getVal('sipDomain');
-  const from = 'sip:'+user+'@'+domain;
-  const callId = makeCallId(), branch = makeBranch(), tag = makeTag();
-  dialog.regCallId = callId; dialog.regFromTag = tag; dialog.regCseq = 1;
-  sendSip(createSipMessage('REGISTER', 'sip:'+domain, {
-    'Via':'SIP/2.0/TCP 0.0.0.0;branch='+branch+';rport',
-    'From':'<'+from+'>;tag='+tag,
-    'To':'<'+from+'>',
-    'Call-ID':callId,
-    'CSeq':'1 REGISTER',
-    'Contact':'<'+from+'>',
-    'Max-Forwards':'70',
-  }));
-}
-
-function doAuthRegister(authHeader, isProxy) {
-  const user = getVal('sipUser'), pass = getVal('sipPass'), domain = getVal('sipDomain');
-  const from = 'sip:'+user+'@'+domain;
-  const ch = parseAuthHeader(authHeader);
-  const realm = ch.realm||domain, nonce = ch.nonce||'';
-  const callId = dialog.regCallId||makeCallId(), branch = makeBranch(), tag = dialog.regFromTag||makeTag();
-  const cseq = (dialog.regCseq||1)+1; dialog.regCseq = cseq;
-  const resp = md5digest('REGISTER', 'sip:'+domain, user, realm, pass, nonce);
-  const authName = isProxy ? 'Proxy-Authorization' : 'Authorization';
-  const hdrs = {
-    'Via':'SIP/2.0/TCP 0.0.0.0;branch='+branch+';rport',
-    'From':'<'+from+'>;tag='+tag,
-    'To':'<'+from+'>',
-    'Call-ID':callId,
-    'CSeq':cseq+' REGISTER',
-    'Contact':'<'+from+'>',
-    'Max-Forwards':'70',
-  };
-  hdrs[authName] = 'Digest username="'+user+'", realm="'+realm+'", nonce="'+nonce+'", uri="sip:'+domain+'", response="'+resp+'"';
-  sendSip(createSipMessage('REGISTER', 'sip:'+domain, hdrs));
-}
-
-function startAudioRelay(sdp) {
-  const info = parseSdp(sdp);
-  if (!info.ip || !info.port) { log('No RTP endpoint en SDP','e'); return false; }
-  rtpTarget = info;
-  log('RTP target: '+info.ip+':'+info.port+' PT='+info.pt);
-  // Connect audio WebSocket
-  audioWs = new WebSocket('wss://'+location.host+'/audio');
-  audioWs.onopen = () => {
-    log('Audio WS conectado','s');
-    audioWs.send(JSON.stringify({type:'start', rtpIp:info.ip, rtpPort:info.port}));
+function startAudioRelay(rtpIp,rtpPort){
+  audioWs=new WebSocket('wss://'+location.host+'/audio');
+  audioWs.onopen=()=>{
+    l('Audio WS conectado','s');
+    audioWs.send(JSON.stringify({type:'start',rtpIp,rtpPort}));
     startMic();
   };
-  audioWs.onmessage = (ev) => {
-    if (typeof ev.data === 'string') {
-      try {
-        const m = JSON.parse(ev.data);
-        if (m.type === 'relay_ready') log('Relay listo en puerto '+m.localPort,'s');
-      } catch(e) {}
+  audioWs.onmessage=(ev)=>{
+    if(typeof ev.data==='string'){
+      try{const m=JSON.parse(ev.data);if(m.type==='relay_ready')l('Relay listo','s')}catch(e){}
       return;
     }
-    // Binary = PCM16 from server (playback)
     playPcm(ev.data);
   };
-  audioWs.onclose = () => { log('Audio WS cerrado'); };
-  audioWs.onerror = () => { log('Error audio WS','e'); };
-  return true;
+  audioWs.onclose=()=>l('Audio WS cerrado');
+  audioWs.onerror=()=>l('Error audio WS','e');
 }
 
-function stopAudioRelay() {
-  if (audioWs && audioWs.readyState === WebSocket.OPEN) {
+function stopAudioRelay(){
+  if(audioWs&&audioWs.readyState===WebSocket.OPEN){
     audioWs.send(JSON.stringify({type:'stop'}));
     audioWs.close();
   }
   stopMic();
 }
 
-// ---- Audio capture & playback ----
-let playbackQueue = [];
-let outputNode = null;
-
-function startMic() {
-  if (!audioCtx) audioCtx = new AudioContext();
-  navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true, noiseSuppression:true}})
-    .then(stream => {
-      micStream = stream;
-      const src = audioCtx.createMediaStreamSource(stream);
-      micProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
-      micProcessor.onaudioprocess = (e) => {
-        const input = e.inputBuffer.getChannelData(0);
-        const pcm16 = new Int16Array(input.length);
-        for (let i = 0; i < input.length; i++) {
-          let s = Math.round(input[i] * 32768);
-          if (s > 32767) s = 32767; else if (s < -32768) s = -32768;
-          pcm16[i] = s;
+function startMic(){
+  if(!audioCtx)audioCtx=new AudioContext();
+  navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}})
+    .then(s=>{
+      micStream=s;
+      const src=audioCtx.createMediaStreamSource(s);
+      micProc=audioCtx.createScriptProcessor(4096,1,1);
+      micProc.onaudioprocess=(e)=>{
+        const inp=e.inputBuffer.getChannelData(0);
+        const pcm=new Int16Array(inp.length);
+        for(let i=0;i<inp.length;i++){
+          let v=Math.round(inp[i]*32768);
+          if(v>32767)v=32767;else if(v<-32768)v=-32768;
+          pcm[i]=v;
         }
-        if (audioWs && audioWs.readyState === WebSocket.OPEN) {
-          audioWs.send(pcm16.buffer);
-        }
+        if(audioWs&&audioWs.readyState===WebSocket.OPEN)audioWs.send(pcm.buffer);
       };
-      src.connect(micProcessor);
-      micProcessor.connect(audioCtx.destination);
-      log('Micrófono activado','s');
-    })
-    .catch(e => log('Error micrófono: '+e.message,'e'));
+      src.connect(micProc);
+      micProc.connect(audioCtx.destination);
+      l('Micrófono activado','s');
+    }).catch(e=>l('Mic error: '+e.message,'e'));
 }
 
-function stopMic() {
-  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
-  if (micProcessor) { try { micProcessor.disconnect(); } catch(e) {} micProcessor = null; }
+function stopMic(){
+  if(micStream){micStream.getTracks().forEach(t=>t.stop());micStream=null}
+  if(micProc){try{micProc.disconnect()}catch(e){}micProc=null}
 }
 
-function playPcm(buffer) {
-  if (!audioCtx) audioCtx = new AudioContext();
-  if (!outputNode) {
-    outputNode = audioCtx.createScriptProcessor(4096, 0, 1);
-    outputNode.onaudioprocess = (e) => {
-      const out = e.outputBuffer.getChannelData(0);
-      const len = out.length;
-      if (playbackQueue.length > 0) {
-        let copied = 0;
-        while (copied < len && playbackQueue.length > 0) {
-          const chunk = playbackQueue[0];
-          const needed = len - copied;
-          if (chunk.length <= needed) {
-            for (let i = 0; i < chunk.length; i++) out[copied+i] = chunk[i];
-            copied += chunk.length;
-            playbackQueue.shift();
-          } else {
-            for (let i = 0; i < needed; i++) out[copied+i] = chunk[i];
-            playbackQueue[0] = chunk.subarray(needed);
-            copied = len;
-          }
+function playPcm(buf){
+  if(!audioCtx)audioCtx=new AudioContext();
+  if(!outNode){
+    outNode=audioCtx.createScriptProcessor(4096,0,1);
+    outNode.onaudioprocess=(e)=>{
+      const out=e.outputBuffer.getChannelData(0);
+      const len=out.length;
+      if(playQ.length>0){
+        let copied=0;
+        while(copied<len&&playQ.length>0){
+          const ch=playQ[0],need=len-copied;
+          if(ch.length<=need){for(let i=0;i<ch.length;i++)out[copied+i]=ch[i];copied+=ch.length;playQ.shift()}
+          else{for(let i=0;i<need;i++)out[copied+i]=ch[i];playQ[0]=ch.subarray(need);copied=len}
         }
-        for (let i = copied; i < len; i++) out[i] = 0;
-      } else {
-        for (let i = 0; i < len; i++) out[i] = 0;
-      }
+        for(let i=copied;i<len;i++)out[i]=0;
+      }else{for(let i=0;i<len;i++)out[i]=0}
     };
-    outputNode.connect(audioCtx.destination);
+    outNode.connect(audioCtx.destination);
   }
-  // Convert PCM16 -> Float32
-  const samples = new Int16Array(buffer);
-  const floats = new Float32Array(samples.length);
-  for (let i = 0; i < samples.length; i++) {
-    floats[i] = samples[i] / 32768;
-  }
-  playbackQueue.push(floats);
+  const s=new Int16Array(buf),f=new Float32Array(s.length);
+  for(let i=0;i<s.length;i++)f[i]=s[i]/32768;
+  playQ.push(f);
 }
 
-// ---- SIP message handler ----
-function handleSip(raw) {
-  const msg = parseSipResponse(raw);
-  log('← '+msg.status+' '+msg.reason);
-  // REGISTER auth
-  if ((msg.status === 401 || msg.status === 407) && !registered) {
-    const hdr = msg.headers['proxy-authenticate'] || msg.headers['www-authenticate'];
-    if (hdr) { log('Autenticando...'); doAuthRegister(hdr, !!msg.headers['proxy-authenticate']); }
-    else { registered = true; showCallCard(); }
-    return;
+async function call(){
+  if(callActive){l('Ya hay llamada','e');return}
+  const user=g('su'),pass=g('sp'),domain=g('sd'),num=g('dn');
+  if(!num){l('Ingresa número','e');return}
+  l('Llamando a '+num+'...');
+  if(!ws||ws.readyState!==WebSocket.OPEN){
+    l('Conectando...');
+    ws=new WebSocket('wss://'+location.host);
+    ws.onopen=()=>{l('WS conectado ✓','s');connected=true;doCall(user,pass,domain,num)};
+    ws.onmessage=(ev)=>handleMsg(ev.data);
+    ws.onclose=()=>{l('WS desconectado','e');connected=false;cleanup()};
+    ws.onerror=()=>l('Error WS','e');
+  }else{
+    doCall(user,pass,domain,num);
   }
-  if (msg.status === 200 && !registered) {
-    registered = true; log('Registrado ✓','s'); showCallCard();
-    return;
-  }
-  // INVITE dialog
-  if (msg.headers['cseq'] && msg.headers['cseq'].includes('INVITE')) {
-    if (msg.status === 407) {
-      const hdr = msg.headers['proxy-authenticate'];
-      if (hdr) doAuthInvite(msg, hdr);
-      return;
-    }
-    if (msg.status === 100 || msg.status === 180 || msg.status === 183) { log('Timbrando...'); return; }
-    if (msg.status === 200) {
-      log('Conectado!','s');
-      if (msg.body) startAudioRelay(msg.body);
-      // Send ACK
-      const branch = makeBranch();
-      const match = msg.headers['to'].match(/sip:[^\s;>]+/);
-      sendSip(createSipMessage('ACK', match ? match[0] : '', {
-        'Via':'SIP/2.0/TCP 0.0.0.0;branch='+branch+';rport',
-        'From':msg.headers['from'],
-        'To':msg.headers['to'],
-        'Call-ID':msg.headers['call-id'],
-        'CSeq':msg.headers['cseq'].replace('INVITE','ACK'),
-        'Max-Forwards':'70',
-      }));
-      document.getElementById('btnCall').disabled = true;
-      document.getElementById('btnHangup').disabled = false;
-      return;
-    }
-  }
-  // BYE response
-  if (msg.status === 200 && msg.headers['cseq'] && msg.headers['cseq'].includes('BYE')) {
-    log('Llamada terminada'); cleanupCall();
-    return;
-  }
-  if (msg.status >= 300 && msg.status !== 407) { log('Error: '+msg.status+' '+msg.reason,'e'); cleanupCall(); }
 }
 
-function doAuthInvite(rs, authHeader) {
-  const user = getVal('sipUser'), pass = getVal('sipPass'), domain = getVal('sipDomain');
-  const number = getVal('destNum');
-  const toUri = 'sip:'+number+'@'+domain, fromUri = 'sip:'+user+'@'+domain;
-  const ch = parseAuthHeader(authHeader);
-  const realm = ch.realm||domain, nonce = ch.nonce||'';
-  const resp = md5digest('INVITE', toUri, user, realm, pass, nonce);
-  const branch = makeBranch();
-  const cseqMatch = rs.headers['cseq'] ? rs.headers['cseq'].match(/\d+/) : null;
-  const cseq = cseqMatch ? parseInt(cseqMatch[0],10)+1 : 2;
-  const sdp = initialSdp();
-  sendSip(createSipMessage('INVITE', toUri, {
-    'Via':'SIP/2.0/TCP 0.0.0.0;branch='+branch+';rport',
-    'From':'<'+fromUri+'>;tag='+currentFromTag,
-    'To':'<'+toUri+'>',
-    'Call-ID':currentCallId,
-    'CSeq':cseq+' INVITE',
-    'Contact':'<'+fromUri+'>',
-    'Content-Type':'application/sdp',
-    'Max-Forwards':'70',
-    'Proxy-Authorization':'Digest username="'+user+'", realm="'+realm+'", nonce="'+nonce+'", uri="'+toUri+'", response="'+resp+'"',
-  }, sdp));
-}
-
-function initialSdp() {
-  // Offer PCMU/PCMA only (no WebRTC) so provider responds with plain RTP SDP
-  return 'v=0\r\n' +
-    'o=- 0 0 IN IP4 0.0.0.0\r\n' +
-    's=-\r\n' +
-    'c=IN IP4 0.0.0.0\r\n' +
-    't=0 0\r\n' +
-    'm=audio 4000 RTP/AVP 0 8\r\n' +
-    'a=rtpmap:0 PCMU/8000\r\n' +
-    'a=rtpmap:8 PCMA/8000\r\n' +
-    'a=sendrecv\r\n';
-}
-
-// ---- Call flow ----
-async function makeCall() {
-  const number = getVal('destNum');
-  if (!number) { log('Ingresa número','e'); return; }
-  if (callActive) { log('Ya hay llamada activa','e'); return; }
-  const domain = getVal('sipDomain'), user = getVal('sipUser');
-  const toUri = 'sip:'+number+'@'+domain, fromUri = 'sip:'+user+'@'+domain;
-  log('Llamando a '+number+'...');
-  currentCallId = makeCallId(); currentFromTag = makeTag(); callActive = true;
-  const branch = makeBranch();
-  const sdp = initialSdp();
-  sendSip(createSipMessage('INVITE', toUri, {
-    'Via':'SIP/2.0/TCP 0.0.0.0;branch='+branch+';rport',
-    'From':'<'+fromUri+'>;tag='+currentFromTag,
-    'To':'<'+toUri+'>',
-    'Call-ID':currentCallId,
-    'CSeq':'1 INVITE',
-    'Contact':'<'+fromUri+'>',
-    'Content-Type':'application/sdp',
-    'Max-Forwards':'70',
-  }, sdp));
-}
-
-function hangup() {
-  if (!callActive) return;
-  const domain = getVal('sipDomain'), user = getVal('sipUser');
-  const number = getVal('destNum');
-  const fromUri = 'sip:'+user+'@'+domain, toUri = 'sip:'+number+'@'+domain;
-  const branch = makeBranch();
-  sendSip(createSipMessage('BYE', toUri, {
-    'Via':'SIP/2.0/TCP 0.0.0.0;branch='+branch+';rport',
-    'From':'<'+fromUri+'>;tag='+currentFromTag,
-    'To':'<'+toUri+'>',
-    'Call-ID':currentCallId,
-    'CSeq':'2 BYE',
-    'Max-Forwards':'70',
+function doCall(user,pass,domain,num){
+  callActive=true;
+  document.getElementById('bc').disabled=true;
+  ws.send(JSON.stringify({
+    action:'sip_call',user,password:pass,domain,number:num
   }));
-  log('Colgando...');
-  cleanupCall();
 }
 
-function cleanupCall() {
-  callActive = false;
+function handleMsg(raw){
+  try{
+    const m=JSON.parse(raw);
+    if(m.type==='debug'){l(m.msg);return}
+    if(m.type==='sip_response'&&m.status===407){
+      // First response without auth - server handles it internally
+      l('Autenticando...');
+      return;
+    }
+    if(m.type==='call_connected'){
+      l('Conectado! | SDP:'+m.sdp.slice(0,40)+'...','s');
+      l('Headers:'+logHeaders(m.headers));
+      const addr=parseSdpAddr(m.sdp);
+      if(addr){
+        l('RTP destino: '+addr.ip+':'+addr.port);
+        startAudioRelay(addr.ip,addr.port);
+      }else{
+        l('No se encontró RTP en SDP','e');
+        l('SDP:'+m.sdp);
+      }
+      document.getElementById('bh').disabled=false;
+      return;
+    }
+    if(m.type==='call_error'){
+      l('Error: '+m.status+' '+m.reason,'e');
+      cleanup();
+    }
+  }catch(e){l('Parse error:'+e.message,'e')}
+}
+
+function hangup(){
+  l('Colgando...');
+  cleanup();
+}
+
+function cleanup(){
+  callActive=false;
   stopAudioRelay();
-  document.getElementById('btnCall').disabled = !registered;
-  document.getElementById('btnHangup').disabled = true;
+  document.getElementById('bc').disabled=false;
+  document.getElementById('bh').disabled=true;
 }
 
-function showCallCard() {
-  document.getElementById('callCard').style.display = 'block';
-  document.getElementById('btnConnect').textContent = '🔄 Reconectar';
-  document.getElementById('btnCall').disabled = false;
-}
-
-// ---- WS connect ----
-function connect() {
-  const url = getVal('wsUrl');
-  if (sipWs && sipWs.readyState === WebSocket.OPEN) sipWs.close();
-  log('Conectando a '+url+'...');
-  sipWs = new WebSocket(url);
-  sipWs.onopen = () => { log('WS conectado ✓','s'); doRegister(); };
-  sipWs.onmessage = (ev) => {
-    const raw = ev.data instanceof Blob ? awaitData(ev.data) : ev.data;
-    if (raw instanceof Promise) raw.then(r => handleSip(r));
-    else handleSip(raw);
-  };
-  sipWs.onclose = () => {
-    log('WS desconectado','e'); registered = false; cleanupCall();
-    document.getElementById('callCard').style.display = 'none';
-    document.getElementById('btnConnect').textContent = 'Conectar';
-  };
-  sipWs.onerror = () => { log('Error WS','e'); };
-}
-
-async function awaitData(blob) { return await blob.text(); }
-
-log('Página cargada. Presiona "Conectar"','i');
+l('Página cargada','i');
 </script>
 </body>
 </html>

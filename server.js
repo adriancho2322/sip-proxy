@@ -1,15 +1,13 @@
 const http = require('http');
-const https = require('https');
 const fs = require('fs');
 const path = require('path');
-const net = require('net');
 const dgram = require('dgram');
 const WebSocket = require('ws');
+const sip = require('sip');
+const crypto = require('crypto');
 
 const PORT = process.env.PORT || 80;
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const SIP_HOST = 'webdial.keepcalling.net';
-const SIP_PORT = 5060;
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -19,227 +17,357 @@ const MIME_TYPES = {
 };
 
 const server = http.createServer((req, res) => {
-  if (req.url === '/') {
-    serveFile('index.html', res);
-  } else if (req.url === '/testudp') {
-    testUdp((r) => { res.writeHead(200); res.end('UDP test: ' + r); });
-  } else {
-    res.writeHead(404);
-    res.end('Not found');
-  }
+  if (req.url === '/') { serveFile('index.html', res); }
+  else { res.writeHead(404); res.end('Not found'); }
 });
 
 function serveFile(name, res) {
   const filePath = path.join(PUBLIC_DIR, name);
   fs.readFile(filePath, (err, data) => {
-    if (err) {
-      res.writeHead(500);
-      res.end('Error loading page');
-      return;
-    }
+    if (err) { res.writeHead(500); res.end('Error'); return; }
     const ext = path.extname(name);
     res.writeHead(200, { 'Content-Type': MIME_TYPES[ext] || 'text/plain' });
     res.end(data);
   });
 }
 
-// ---- SIP WebSocket proxy (WS -> TCP) ----
-const wss = new WebSocket.Server({ server, path: '/ws' });
+// SIP stack (shared)
+sip.start({ tcp: true, udp: false, port: 0 }, function(rq) {
+  sip.send(sip.makeResponse(rq, 404, 'Not Found'));
+});
+console.log('SIP stack started');
+
+function rstring() { return Math.floor(Math.random() * 1e12).toString(); }
+
+function stripQuotes(s) {
+  if (typeof s === 'string' && s.length >= 2 && s[0] === '"' && s[s.length - 1] === '"') return s.slice(1, -1);
+  return s;
+}
+
+// ---- WebSocket signaling: JSON API (pares sip) ----
+const wss = new WebSocket.Server({ server });
 
 wss.on('connection', (ws) => {
-  let tcp = null;
-  let tcpConnecting = true;
-  let msgBuffer = [];
+  let pendingAuth = null; // pending auth challenge for re-invite
 
-  function flushBuffer() {
-    if (!tcpConnecting && tcp) {
-      while (msgBuffer.length > 0) {
-        tcp.write(msgBuffer.shift());
-      }
-    }
-  }
-
-  tcp = net.createConnection(SIP_PORT, SIP_HOST, () => {
-    console.log('SIP TCP connected');
-    tcpConnecting = false;
-    flushBuffer();
-  });
-
-  tcp.setTimeout(10000);
-  tcp.on('timeout', () => { console.log('TCP timeout'); tcp.destroy(); ws.close(); });
-
-  let tcpBuffer = '';
-
-  function parseContentLength(headers) {
-    const m = headers.match(/^Content-Length:\s*(\d+)/im);
-    return m ? parseInt(m[1], 10) : 0;
+  function sendJSON(obj) { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); }
+  function sendDebug(msg) { sendJSON({ type: 'debug', msg: String(msg) }); }
+  function sendSipResponse(reqId, status, body, rawHeaders) {
+    sendJSON({ type: 'sip_response', reqId, status, body: body || '', headers: rawHeaders || {} });
   }
 
   ws.on('message', (raw) => {
-    const data = typeof raw === 'string' ? raw : raw.toString();
-    if (tcpConnecting || !tcp) {
-      msgBuffer.push(data);
-    } else {
-      tcp.write(data);
-    }
-  });
+    const str = Buffer.isBuffer(raw) ? raw.toString() : raw;
+    let msg;
+    try { msg = JSON.parse(str); } catch (e) { return; }
 
-  tcp.on('data', (chunk) => {
-    tcpBuffer += chunk.toString();
-    while (true) {
-      const idx = tcpBuffer.indexOf('\r\n\r\n');
-      if (idx === -1) break;
-      const headerPart = tcpBuffer.substring(0, idx);
-      const clen = parseContentLength(headerPart);
-      const totalLen = idx + 4 + clen;
-      if (tcpBuffer.length < totalLen) break;
-      const msg = tcpBuffer.substring(0, totalLen);
-      tcpBuffer = tcpBuffer.substring(totalLen);
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(msg);
+    // --- sip_call: send SIP request ---
+    if (msg.action === 'sip_call') {
+      const domain = msg.domain || 'webdial.keepcalling.net';
+      const user = msg.user;
+      const pass = msg.password;
+      const number = msg.number;
+      const fromUri = 'sip:' + user + '@' + domain;
+      const toUri = 'sip:' + number + '@' + domain;
+
+      sendDebug('Llamando a ' + number);
+
+      function doInvite(authHeader) {
+        const req = {
+          method: 'INVITE',
+          uri: toUri,
+          headers: {
+            to: { uri: toUri },
+            from: { uri: fromUri, params: { tag: rstring() } },
+            'call-id': rstring(),
+            cseq: { method: 'INVITE', seq: Math.floor(Math.random() * 1e5) },
+            'content-type': 'application/sdp',
+            contact: [{ uri: fromUri }],
+            'max-forwards': '70',
+          },
+          content: 'v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n',
+        };
+        if (authHeader) {
+          const challenge = authHeader;
+          const realm = stripQuotes(challenge.realm) || domain;
+          const nonce = stripQuotes(challenge.nonce) || '';
+          const ha1 = crypto.createHash('md5').update(user + ':' + realm + ':' + pass).digest('hex');
+          const ha2 = crypto.createHash('md5').update('INVITE' + ':' + toUri).digest('hex');
+          const response = crypto.createHash('md5').update(ha1 + ':' + nonce + ':' + ha2).digest('hex');
+          req.headers['proxy-authorization'] = [{
+            scheme: 'Digest',
+            username: user,
+            realm: realm,
+            nonce: nonce,
+            uri: toUri,
+            algorithm: 'MD5',
+            response: response,
+            opaque: stripQuotes(challenge.opaque) || undefined,
+          }];
+        }
+        sip.send(req, (rs) => handleResponse(rs, reqId));
       }
+
+      function handleResponse(rs, reqId) {
+        sendDebug('SIP ' + rs.status + ' ' + (rs.reason || ''));
+        if (rs.status === 407) {
+          const challenges = rs.headers['proxy-authenticate'];
+          const challenge = Array.isArray(challenges) ? challenges[0] : challenges;
+          if (challenge) {
+            pendingAuth = { challenge, user, pass, domain, number, fromUri, toUri };
+            if (msg.requireAuth !== false) {
+              sendDebug('Autenticando...');
+              doInvite(challenge);
+            } else {
+              // Just return the auth challenge
+              sendSipResponse(reqId, 407, (rs.content || ''), {
+                proxy_authenticate: challenge,
+                'call-id': rs.headers['call-id'] ? (Array.isArray(rs.headers['call-id']) ? rs.headers['call-id'][0] : rs.headers['call-id']) : '',
+                'cseq': rs.headers['cseq'] ? (Array.isArray(rs.headers['cseq']) ? rs.headers['cseq'][0] : rs.headers['cseq']) : '',
+                'from': rs.headers['from'] ? (Array.isArray(rs.headers['from']) ? rs.headers['from'][0] : rs.headers['from']) : '',
+                'to': rs.headers['to'] ? (Array.isArray(rs.headers['to']) ? rs.headers['to'][0] : rs.headers['to']) : '',
+              });
+              sendSipResponse(reqId, 407, (rs.content || ''), {
+                proxy_authenticate: JSON.stringify(Array.isArray(challenges) ? challenges : [challenges]),
+              });
+            }
+          }
+          return;
+        }
+        if (rs.status >= 200 && rs.status < 300) {
+          // Return SDP so browser can start audio relay
+          sendJSON({
+            type: 'call_connected',
+            reqId,
+            sdp: rs.content || '',
+            headers: {
+              to: stringifyHeader(rs.headers['to']),
+              from: stringifyHeader(rs.headers['from']),
+              'call-id': stringifyHeader(rs.headers['call-id']),
+              cseq: stringifyHeader(rs.headers['cseq']),
+              contact: stringifyHeader(rs.headers['contact']),
+            },
+          });
+          // Send ACK
+          const contact = Array.isArray(rs.headers['contact']) ? rs.headers['contact'][0] : rs.headers['contact'];
+          const contactUri = contact && contact.uri ? contact.uri : toUri;
+          sip.send({
+            method: 'ACK',
+            uri: contactUri,
+            headers: {
+              to: rs.headers['to'],
+              from: rs.headers['from'],
+              'call-id': rs.headers['call-id'],
+              cseq: { method: 'ACK', seq: rs.headers['cseq'].seq || (typeof rs.headers['cseq'] === 'object' ? rs.headers['cseq'].seq : NaN) },
+              via: [],
+            },
+          });
+          return;
+        }
+        if (rs.status >= 300) {
+          sendJSON({ type: 'call_error', reqId, status: rs.status, reason: rs.reason || '' });
+        }
+      }
+
+      doInvite(null);
+      return;
+    }
+
+    // --- sip_auth: complete auth and re-send INVITE ---
+    if (msg.action === 'sip_auth' && pendingAuth) {
+      const { challenge, user, pass, domain, number, fromUri, toUri } = pendingAuth;
+      const realm = stripQuotes(challenge.realm) || domain;
+      const nonce = stripQuotes(challenge.nonce) || '';
+      const ha1 = crypto.createHash('md5').update(user + ':' + realm + ':' + pass).digest('hex');
+      const ha2 = crypto.createHash('md5').update('INVITE' + ':' + toUri).digest('hex');
+      const response = crypto.createHash('md5').update(ha1 + ':' + nonce + ':' + ha2).digest('hex');
+      const req = {
+        method: 'INVITE',
+        uri: toUri,
+        headers: {
+          to: { uri: toUri },
+          from: { uri: fromUri, params: { tag: rstring() } },
+          'call-id': msg.callId || rstring(),
+          cseq: { method: 'INVITE', seq: Math.floor(Math.random() * 1e5) },
+          'content-type': 'application/sdp',
+          contact: [{ uri: fromUri }],
+          'max-forwards': '70',
+          'proxy-authorization': [{
+            scheme: 'Digest',
+            username: user,
+            realm: realm,
+            nonce: nonce,
+            uri: toUri,
+            algorithm: 'MD5',
+            response: response,
+            opaque: stripQuotes(challenge.opaque) || undefined,
+          }],
+        },
+        content: msg.sdp || 'v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n',
+      };
+      sip.send(req, (rs) => {
+        sendDebug('SIP ' + rs.status + ' ' + (rs.reason || ''));
+        if (rs.status >= 200 && rs.status < 300) {
+          sendJSON({
+            type: 'call_connected',
+            reqId: msg.reqId,
+            sdp: rs.content || '',
+            headers: {
+              to: stringifyHeader(rs.headers['to']),
+              from: stringifyHeader(rs.headers['from']),
+              'call-id': stringifyHeader(rs.headers['call-id']),
+              cseq: stringifyHeader(rs.headers['cseq']),
+              contact: stringifyHeader(rs.headers['contact']),
+            },
+          });
+          const contact = Array.isArray(rs.headers['contact']) ? rs.headers['contact'][0] : rs.headers['contact'];
+          const contactUri = contact && contact.uri ? contact.uri : toUri;
+          sip.send({
+            method: 'ACK',
+            uri: contactUri,
+            headers: {
+              to: rs.headers['to'],
+              from: rs.headers['from'],
+              'call-id': rs.headers['call-id'],
+              cseq: { method: 'ACK', seq: rs.headers['cseq'].seq || (typeof rs.headers['cseq'] === 'object' ? rs.headers['cseq'].seq : NaN) },
+              via: [],
+            },
+          });
+        } else if (rs.status >= 300) {
+          sendJSON({ type: 'call_error', reqId: msg.reqId, status: rs.status, reason: rs.reason || '' });
+        }
+      });
+      return;
+    }
+
+    // --- sip_bye ---
+    if (msg.action === 'sip_bye' && msg.headers) {
+      const h = msg.headers;
+      sip.send({
+        method: 'BYE',
+        uri: h.to_uri || 'sip:none@none',
+        headers: {
+          to: parseHeader(h.to),
+          from: parseHeader(h.from),
+          'call-id': h['call-id'],
+          cseq: { method: 'BYE', seq: parseInt(h.cseq_seq) || 1 },
+          via: [],
+        },
+      });
+      sendDebug('BYE enviado');
+      return;
     }
   });
 
-  function cleanup() {
-    if (tcp) { try { tcp.destroy(); } catch(e) {} tcp = null; }
-    if (ws.readyState === WebSocket.OPEN) ws.close();
-  }
-
-  tcp.on('close', () => cleanup());
-  tcp.on('error', (e) => { console.error('TCP error:', e.message); cleanup(); });
-  ws.on('close', () => { if (tcp) { try { tcp.destroy(); } catch(e) {} tcp = null; } });
-  ws.on('error', () => { if (tcp) { try { tcp.destroy(); } catch(e) {} tcp = null; } });
+  ws.on('close', () => {});
 });
+
+function stringifyHeader(h) {
+  if (!h) return '';
+  if (typeof h === 'string') return h;
+  if (h.uri) return '<' + h.uri + '>' + (h.params && h.params.tag ? ';tag=' + h.params.tag : '');
+  try { return JSON.stringify(h); } catch(e) { return String(h); }
+}
+
+function parseHeader(str) {
+  if (!str) return { uri: 'sip:none@none' };
+  const match = str.match(/<([^>]+)>/);
+  const uri = match ? match[1] : str;
+  const tagMatch = str.match(/tag=([^;>]+)/);
+  const params = tagMatch ? { tag: tagMatch[1] } : {};
+  return { uri, params };
+}
 
 // ---- Audio WebSocket (PCM16 <-> RTP/UDP bridge) ----
 const audioServer = new WebSocket.Server({ server, path: '/audio' });
 
-// Simple PCM16 48kHz -> PCMA 8kHz conversion
 function linearToAlaw(sample) {
-  // 16-bit signed to 8-bit a-law
-  const SIGN = 0x80;
-  const CLIP = 0x7f;
   if (sample >= 0) {
-    const mask = 0xD5;
-    if (sample > CLIP) sample = CLIP;
-    sample = sample | 0x80;
-  } else {
-    const mask = 0x55;
-    sample = -sample;
-    if (sample > CLIP) sample = CLIP;
+    if (sample > 0x7fff) sample = 0x7fff;
     sample = sample | 0x80;
     let seg = (sample >> 4) & 0x0f;
-    if (seg >= 8) return ((seg << 4) | ((sample >> (seg - 4)) & 0x0f)) ^ mask;
+    return ((seg << 4) | ((sample >> (seg >= 4 ? seg - 4 : 0)) & 0x0f)) ^ 0xD5;
   }
+  sample = -sample;
+  if (sample > 0x7fff) sample = 0x7fff;
+  sample = sample | 0x80;
   let seg = (sample >> 4) & 0x0f;
-  if (seg >= 8) return ((seg << 4) | ((sample >> (seg - 4)) & 0x0f)) ^ 0xD5;
-  return ((seg << 4) | ((sample >> (seg >= 4 ? seg - 4 : 0)) & 0x0f)) ^ 0xD5;
+  return ((seg << 4) | ((sample >> (seg >= 4 ? seg - 4 : 0)) & 0x0f)) ^ 0x55;
 }
 
 audioServer.on('connection', (ws) => {
-  let relay = null; // { rtpIp, rtpPort, ssrc, seq, ts, sock }
-  let pcmInputBuffer = Buffer.alloc(0); // buffer raw PCM16 input
-  let pcmOutputBuffer = Buffer.alloc(0); // buffer raw PCM16 for output
+  let relay = null;
+  let pcmInputBuffer = Buffer.alloc(0);
+  let pcmOutputBuffer = Buffer.alloc(0);
 
   function startRelay(info) {
     stopRelay();
     const sock = dgram.createSocket('udp4');
-    sock.on('error', (e) => console.error('RTP socket error:', e.message));
+    sock.on('error', (e) => console.error('RTP error:', e.message));
     sock.on('message', (msg) => {
-      // Receive RTP from provider -> extract PCM -> send to browser
       if (msg.length < 12) return;
       const pt = msg.readUInt8(1) & 0x7f;
-      if (pt !== 8 && pt !== 0) return; // skip non-audio
+      if (pt !== 8 && pt !== 0) return;
       const payload = msg.subarray(12);
-      // Decompress a-law to PCM16
       const pcm16 = Buffer.alloc(payload.length * 2);
       for (let i = 0; i < payload.length; i++) {
         const alaw = payload[i] ^ 0xD5;
-        let sign = (alaw & 0x80) ? -1 : 1;
-        let exponent = (alaw >> 4) & 0x07;
-        let mantissa = alaw & 0x0f;
-        let sample = sign * ((exponent === 0 ? mantissa : ((mantissa << 3) | 0x84)) << (exponent + 4));
-        pcm16.writeInt16LE(sample, i * 2);
+        const sign = (alaw & 0x80) ? -1 : 1;
+        const exponent = (alaw >> 4) & 0x07;
+        const mantissa = alaw & 0x0f;
+        let s = sign * ((exponent === 0 ? mantissa : ((mantissa << 3) | 0x84)) << (exponent + 4));
+        pcm16.writeInt16LE(s, i * 2);
       }
       pcmOutputBuffer = Buffer.concat([pcmOutputBuffer, pcm16]);
-      // Send buffered PCM to browser
-      while (pcmOutputBuffer.length >= 192) { // 96 samples @ 48kHz = 2ms buffer
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(pcmOutputBuffer.subarray(0, 192));
-        }
+      while (pcmOutputBuffer.length >= 192) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(pcmOutputBuffer.subarray(0, 192));
         pcmOutputBuffer = pcmOutputBuffer.subarray(192);
       }
     });
-
     sock.bind(0, '0.0.0.0', () => {
       const addr = sock.address();
-      console.log('RTP relay bound to :' + addr.port);
+      console.log('RTP relay port', addr.port);
       relay = {
-        sock,
-        rtpIp: info.rtpIp,
-        rtpPort: info.rtpPort,
+        sock, rtpIp: info.rtpIp, rtpPort: info.rtpPort,
         ssrc: info.ssrc || Math.floor(Math.random() * 0xFFFFFFFF),
-        seq: 0,
-        ts: 0,
+        seq: 0, ts: 0,
       };
       ws.send(JSON.stringify({ type: 'relay_ready', localPort: addr.port }));
     });
   }
 
   function stopRelay() {
-    if (relay && relay.sock) {
-      try { relay.sock.close(); } catch (e) {}
-    }
-    relay = null;
-    pcmInputBuffer = Buffer.alloc(0);
+    if (relay && relay.sock) { try { relay.sock.close(); } catch(e) {} }
+    relay = null; pcmInputBuffer = Buffer.alloc(0);
   }
 
   ws.on('message', (raw) => {
     if (typeof raw === 'string') {
       try {
         const msg = JSON.parse(raw);
-        if (msg.type === 'start') {
-          startRelay(msg);
-        } else if (msg.type === 'stop') {
-          stopRelay();
-        }
-      } catch (e) {}
+        if (msg.type === 'start') startRelay(msg);
+        else if (msg.type === 'stop') stopRelay();
+      } catch(e) {}
       return;
     }
-
-    // Binary = PCM16 input from browser @ 48kHz
     if (!relay) return;
-    pcmInputBuffer = Buffer.concat([pcmInputBuffer, raw]);
-
-    // Flush 20ms of audio @ 8kHz = 160 PCMA samples
-    const pcm16Samples = pcmInputBuffer.length / 2;
-    const targetSamples = 160 * 6; // 960 PCM16 samples @ 48kHz = 20ms = 160 PCMA @ 8kHz
-    if (pcm16Samples >= targetSamples) {
+    pcmInputBuffer = Buffer.concat([pcmInputBuffer, Buffer.from(raw)]);
+    const targetSamples = 960; // 20ms @ 48kHz -> 160 PCMA @ 8kHz
+    while (pcmInputBuffer.length >= targetSamples * 2) {
       const packet = pcmInputBuffer.subarray(0, targetSamples * 2);
       pcmInputBuffer = pcmInputBuffer.subarray(targetSamples * 2);
-
-      // Downsample 48kHz -> 8kHz (take every 6th sample) and encode PCMA
       const pcma = Buffer.alloc(160);
-      for (let i = 0; i < 160; i++) {
-        const sample = packet.readInt16LE(i * 12); // every 6th sample at 48kHz
-        pcma[i] = linearToAlaw(sample);
-      }
-
-      // Build RTP header
+      for (let i = 0; i < 160; i++) pcma[i] = linearToAlaw(packet.readInt16LE(i * 12));
       const rtp = Buffer.alloc(12 + 160);
-      rtp[0] = 0x80; // V=2, P=0, X=0, CC=0
-      rtp[1] = 0x88; // M=1 (first in talkspurt), PT=8 (PCMA)
+      rtp[0] = 0x80; rtp[1] = 0x88;
       rtp.writeUInt16BE(relay.seq, 2);
       rtp.writeUInt32BE(relay.ts, 4);
       rtp.writeUInt32BE(relay.ssrc, 8);
       pcma.copy(rtp, 12);
-
       relay.seq = (relay.seq + 1) & 0xFFFF;
       relay.ts += 160;
-
-      relay.sock.send(rtp, 0, rtp.length, relay.rtpPort, relay.rtpIp, (err) => {
-        if (err) console.error('RTP send error:', err.message);
+      relay.sock.send(rtp, 0, rtp.length, relay.rtpPort, relay.rtpIp, (e) => {
+        if (e) console.error('RTP send error:', e.message);
       });
     }
   });
@@ -248,22 +376,6 @@ audioServer.on('connection', (ws) => {
   ws.on('error', () => stopRelay());
 });
 
-function testUdp(callback) {
-  const sock = dgram.createSocket('udp4');
-  let result = 'ok';
-  sock.on('error', (err) => { result = 'error: ' + err.message; });
-  sock.bind(0, '0.0.0.0', () => {
-    const addr = sock.address();
-    const msg = Buffer.from('test');
-    sock.send(msg, 0, msg.length, 53, '8.8.8.8', (err) => {
-      if (err) result = 'send error: ' + err.message;
-      sock.close();
-      callback(result + ' bound=' + addr.address + ':' + addr.port);
-    });
-  });
-  setTimeout(() => { try { sock.close(); } catch(e) {} if (result === 'ok') result = 'timeout'; callback(result); }, 5000);
-}
-
 server.listen(PORT, '0.0.0.0', () => {
-  console.log('Server listening on port ' + PORT);
+  console.log('Server on port ' + PORT);
 });
