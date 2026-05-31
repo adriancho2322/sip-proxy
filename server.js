@@ -68,10 +68,27 @@ wss.on('connection', (ws) => {
   function sendJSON(obj) { try { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); } catch(e) {} }
   function sendDebug(msg) { sendJSON({ type: 'debug', msg: String(msg) }); }
 
-  function safeSipSend(req, cb) {
-    try { sip.send(req, cb); }
-    catch(e) {
-      console.error('safeSipSend error:', e.message);
+  function safeSipSend(req, cb, timeoutMs) {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      console.error('SIP timeout for', req.method, req.uri);
+      sendDebug('SIP timeout para ' + req.method + ' ' + req.uri);
+      if (cb) cb({ status: 408, reason: 'Request Timeout', headers: {}, content: '' });
+    }, timeoutMs || 15000);
+    const wrappedCb = (rs) => {
+      if (done) return;
+      done = true; clearTimeout(timer);
+      if (cb) cb(rs);
+    };
+    try {
+      console.log('SIP send ' + req.method + ' ' + req.uri);
+      sip.send(req, wrappedCb);
+    } catch(e) {
+      if (done) return;
+      done = true; clearTimeout(timer);
+      console.error('safeSipSend error:', e.message, e.stack);
       sendDebug('Error SIP: ' + e.message);
       if (cb) cb({ status: 500, reason: 'Server error: ' + e.message, headers: {}, content: '' });
     }
