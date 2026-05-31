@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const WebSocket = require('ws');
 const sip = require('sip');
+const digest = require('sip/digest');
 
 const PORT = process.env.PORT || 80;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -105,25 +106,87 @@ wss.on('connection', (ws) => {
 
     const domain = (sipAccount && sipAccount.sipDomain) || 'webdial.keepcalling.net';
     const user = (sipAccount && sipAccount.sipUserName) || from;
+    const pass = (sipAccount && sipAccount.sipPassword) || '';
     const fromUri = 'sip:' + user + '@' + domain;
     const toUri = 'sip:' + to + '@' + domain;
     const contactUri = 'sip:' + user + '@' + domain;
+    let authSession = null;
 
-    sip.send({
-      method: 'INVITE',
-      uri: toUri,
-      headers: {
-        to: { uri: toUri },
-        from: { uri: fromUri, params: { tag: rstring() } },
-        'call-id': rstring(),
-        cseq: { method: 'INVITE', seq: Math.floor(Math.random() * 1e5) },
-        'content-type': 'application/sdp',
-        contact: [{ uri: contactUri }],
-        'max-forwards': '70'
-      },
-      content: ''
-    }, function(rs) {
+    sendDebug('Usuario SIP: ' + user + ' @ ' + domain);
+
+    function sendInvite() {
+      sip.send({
+        method: 'INVITE',
+        uri: toUri,
+        headers: {
+          to: { uri: toUri },
+          from: { uri: fromUri, params: { tag: rstring() } },
+          'call-id': rstring(),
+          cseq: { method: 'INVITE', seq: Math.floor(Math.random() * 1e5) },
+          'content-type': 'application/sdp',
+          contact: [{ uri: contactUri }],
+          'max-forwards': '70'
+        },
+        content: ''
+      }, handleResponse);
+    }
+
+    function handleResponse(rs) {
       sendDebug('SIP response: ' + rs.status + ' ' + (rs.reason || ''));
+      if (rs.status === 407) {
+        sendDebug('Autenticación requerida, enviando credenciales...');
+        const req = {
+          method: 'INVITE',
+          uri: toUri,
+          headers: {
+            to: { uri: toUri },
+            from: { uri: fromUri, params: { tag: rstring() } },
+            'call-id': rs.headers['call-id'] || rstring(),
+            cseq: { method: 'INVITE', seq: Math.floor(Math.random() * 1e5) },
+            'content-type': 'application/sdp',
+            contact: [{ uri: contactUri }],
+            'max-forwards': '70'
+          },
+          content: ''
+        };
+        authSession = {};
+        const signedReq = digest.signRequest(
+          authSession,
+          req,
+          rs,
+          { user: user, password: pass }
+        );
+        if (signedReq) {
+          sip.send(signedReq, function(rs2) {
+            sendDebug('SIP auth response: ' + rs2.status + ' ' + (rs2.reason || ''));
+            if (rs2.status >= 200 && rs2.status < 300) {
+              sendBCEvent({ Connected: {} });
+              callActive = true;
+              sip.send({
+                method: 'ACK',
+                uri: rs2.headers.contact[0].uri,
+                headers: {
+                  to: rs2.headers.to,
+                  from: rs2.headers.from,
+                  'call-id': rs2.headers['call-id'],
+                  cseq: { method: 'ACK', seq: rs2.headers.cseq.seq },
+                  via: []
+                }
+              });
+            } else if (rs2.status >= 100 && rs2.status < 200) {
+              sendBCEvent({ RingingCallee: {} });
+            } else {
+              sendBCEvent({ NoCall: {} });
+              callActive = false;
+              sendDebug('Llamada falló: ' + rs2.status + ' ' + (rs2.reason || ''));
+            }
+          });
+        } else {
+          sendDebug('Error firmando request de autenticación');
+          sendBCEvent({ NoCall: {} });
+        }
+        return;
+      }
       if (rs.status >= 200 && rs.status < 300) {
         sendBCEvent({ Connected: {} });
         callActive = true;
@@ -143,8 +206,11 @@ wss.on('connection', (ws) => {
       } else {
         sendBCEvent({ NoCall: {} });
         callActive = false;
+        sendDebug('Llamada falló: ' + rs.status + ' ' + (rs.reason || ''));
       }
-    });
+    }
+
+    sendInvite();
   }
 
   ws.on('message', (raw) => {
