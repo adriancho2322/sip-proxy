@@ -47,9 +47,26 @@ function serveFile(name, res) {
 const wss = new WebSocket.Server({ server, path: '/ws' });
 
 wss.on('connection', (ws) => {
-  const tcp = net.createConnection(SIP_PORT, SIP_HOST, () => {
+  let tcp = null;
+  let tcpConnecting = true;
+  let msgBuffer = [];
+
+  function flushBuffer() {
+    if (!tcpConnecting && tcp) {
+      while (msgBuffer.length > 0) {
+        tcp.write(msgBuffer.shift());
+      }
+    }
+  }
+
+  tcp = net.createConnection(SIP_PORT, SIP_HOST, () => {
     console.log('SIP TCP connected');
+    tcpConnecting = false;
+    flushBuffer();
   });
+
+  tcp.setTimeout(10000);
+  tcp.on('timeout', () => { console.log('TCP timeout'); tcp.destroy(); ws.close(); });
 
   let tcpBuffer = '';
 
@@ -60,7 +77,11 @@ wss.on('connection', (ws) => {
 
   ws.on('message', (raw) => {
     const data = typeof raw === 'string' ? raw : raw.toString();
-    tcp.write(data);
+    if (tcpConnecting || !tcp) {
+      msgBuffer.push(data);
+    } else {
+      tcp.write(data);
+    }
   });
 
   tcp.on('data', (chunk) => {
@@ -80,10 +101,15 @@ wss.on('connection', (ws) => {
     }
   });
 
-  tcp.on('close', () => ws.close());
-  tcp.on('error', (e) => ws.close());
-  ws.on('close', () => tcp.destroy());
-  ws.on('error', () => tcp.destroy());
+  function cleanup() {
+    if (tcp) { try { tcp.destroy(); } catch(e) {} tcp = null; }
+    if (ws.readyState === WebSocket.OPEN) ws.close();
+  }
+
+  tcp.on('close', () => cleanup());
+  tcp.on('error', (e) => { console.error('TCP error:', e.message); cleanup(); });
+  ws.on('close', () => { if (tcp) { try { tcp.destroy(); } catch(e) {} tcp = null; } });
+  ws.on('error', () => { if (tcp) { try { tcp.destroy(); } catch(e) {} tcp = null; } });
 });
 
 // ---- Audio WebSocket (PCM16 <-> RTP/UDP bridge) ----
