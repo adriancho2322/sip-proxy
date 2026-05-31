@@ -4,8 +4,8 @@ const path = require('path');
 const dgram = require('dgram');
 const net = require('net');
 const WebSocket = require('ws');
-const sip = require('sip');
 const crypto = require('crypto');
+const dns = require('dns');
 
 const PORT = process.env.PORT || 80;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -17,51 +17,11 @@ const MIME_TYPES = {
   '.ico': 'image/x-icon',
 };
 
-const dns = require('dns');
+const SIP_HOST = 'webdial.keepcalling.net';
+const SIP_PORT = 5060;
 
 const server = http.createServer((req, res) => {
   if (req.url === '/') { serveFile('index.html', res); }
-  else if (req.url === '/dns') {
-    dns.resolveSrv('_sip._udp.webdial.keepcalling.net', (err, srv) => {
-      dns.resolve4('webdial.keepcalling.net', (err2, addrs) => {
-        res.setHeader('Content-Type', 'text/plain');
-        res.end('SRV: ' + (err ? err.code : JSON.stringify(srv)) + '\nA: ' + (err2 ? err2.code : JSON.stringify(addrs)));
-      });
-    });
-  }
-  else if (req.url === '/siptest') {
-    dns.resolve4('webdial.keepcalling.net', (err, addrs) => {
-      if (err) { res.end('DNS error: ' + err.code); return; }
-      const ip = addrs[0];
-      const sock = new net.Socket();
-      sock.setTimeout(8000);
-      let responded = false;
-      sock.connect(5060, ip, () => {
-        const msg = [
-          'OPTIONS sip:webdial.keepcalling.net SIP/2.0',
-          'Via: SIP/2.0/TCP 0.0.0.0:0;branch=z9hG4bK-test123',
-          'From: <sip:test@test.com>;tag=test',
-          'To: <sip:test@webdial.keepcalling.net>',
-          'Call-ID: test123@test',
-          'CSeq: 1 OPTIONS',
-          'Contact: <sip:test@0.0.0.0>',
-          'Max-Forwards: 70',
-          'Content-Length: 0',
-          '', '',
-        ].join('\r\n');
-        sock.write(msg);
-      });
-      let buf = '';
-      sock.on('data', (data) => { buf += data.toString(); });
-      sock.on('timeout', () => { if (!responded) { responded = true; res.end('TCP timeout after connect'); } sock.destroy(); });
-      sock.on('error', (e) => { if (!responded) { responded = true; res.end('TCP error: ' + e.message); } sock.destroy(); });
-      setTimeout(() => {
-        if (!responded) { responded = true;
-          res.end('Response len=' + buf.length + '\n' + buf.slice(0, 2000));
-        } sock.destroy();
-      }, 5000);
-    });
-  }
   else { res.writeHead(404); res.end('Not found'); }
 });
 
@@ -75,20 +35,141 @@ function serveFile(name, res) {
   });
 }
 
-// SIP stack (shared)
-let sipReady = false;
-try {
-  sip.start({ udp: true, tcp: false, port: 15060 }, function(rq) {
-    if (!sipReady) return;
-    try { sip.send(sip.makeResponse(rq, 404, 'Not Found')); } catch(e) {}
-  });
-  sipReady = true;
-  console.log('SIP stack started');
-} catch(e) {
-  console.error('SIP stack error:', e.message);
+// ---- Raw SIP over TCP ----
+// Construct a SIP request string from an object like {method, uri, headers, content}
+function rstring() { return Math.floor(Math.random() * 1e12).toString(); }
+
+function buildSipRequest(req) {
+  const hdrs = req.headers || {};
+  let hasVia = false, hasContentLength = false;
+  let msg = req.method + ' ' + req.uri + ' SIP/2.0\r\n';
+  for (const [k, v] of Object.entries(hdrs)) {
+    if (v === undefined || v === null) continue;
+    const lk = k.toLowerCase();
+    if (lk === 'via') hasVia = true;
+    if (lk === 'content-length') hasContentLength = true;
+    const vals = Array.isArray(v) ? v : [v];
+    for (const val of vals) {
+      if (typeof val === 'object') {
+        if (lk === 'to' || lk === 'from') {
+          let s = '<' + val.uri + '>';
+          if (val.params && val.params.tag) s += ';tag=' + val.params.tag;
+          msg += k + ': ' + s + '\r\n';
+        } else if (lk === 'contact') {
+          let s = '<' + val.uri + '>';
+          msg += k + ': ' + s + '\r\n';
+        } else if (lk === 'cseq') {
+          msg += k + ': ' + (val.seq || 1) + ' ' + (val.method || req.method) + '\r\n';
+        } else if (lk === 'via') {
+          msg += k + ': SIP/2.0/TCP ' + (val.host || '0.0.0.0') + ':' + (val.port || '0') + ';branch=' + (val.params ? val.params.branch : 'z9hG4bK' + rstring()) + '\r\n';
+        } else if (lk === 'proxy-authorization' || lk === 'authorization') {
+          let s = val.scheme + ' ';
+          for (const [pk, pv] of Object.entries(val)) {
+            if (pk === 'scheme') continue;
+            s += pk + '="' + pv + '", ';
+          }
+          msg += k + ': ' + s.replace(/, $/, '') + '\r\n';
+        } else {
+          msg += k + ': ' + JSON.stringify(val) + '\r\n';
+        }
+      } else {
+        msg += k + ': ' + String(val) + '\r\n';
+      }
+    }
+  }
+  if (!hasVia) msg += 'Via: SIP/2.0/TCP 0.0.0.0:0;branch=z9hG4bK' + rstring() + '\r\n';
+  const body = req.content || '';
+  if (!hasContentLength) msg += 'Content-Length: ' + Buffer.byteLength(body) + '\r\n';
+  msg += '\r\n';
+  msg += body;
+  return msg;
 }
 
-function rstring() { return Math.floor(Math.random() * 1e12).toString(); }
+// Parse a SIP response string into {status, reason, headers, content}
+function parseSipResponse(text) {
+  const idx = text.indexOf('\r\n\r\n');
+  if (idx === -1) return null;
+  const head = text.slice(0, idx);
+  const body = text.slice(idx + 4);
+  const lines = head.split('\r\n');
+  const sl = lines[0].match(/^SIP\/2\.0\s+(\d+)\s+(.*)$/);
+  if (!sl) return null;
+  const headers = {};
+  for (let i = 1; i < lines.length; i++) {
+    const m = lines[i].match(/^([^:]+):\s*(.*)$/);
+    if (m) {
+      const k = m[1].toLowerCase();
+      const v = m[2];
+      if (headers[k]) { if (!Array.isArray(headers[k])) headers[k] = [headers[k]]; headers[k].push(v); }
+      else headers[k] = v;
+    }
+  }
+  return { status: parseInt(sl[1]), reason: sl[2], headers, content: body };
+}
+
+// Send SIP request via TCP and call callback with parsed response
+function sendSipTcp(req, cb, timeoutMs) {
+  const msgStr = buildSipRequest(req);
+  let done = false;
+  const timer = setTimeout(() => {
+    if (done) return; done = true;
+    if (cb) cb({ status: 408, reason: 'Request Timeout', headers: {}, content: '' });
+  }, timeoutMs || 15000);
+
+  dns.resolve4(SIP_HOST, (err, addrs) => {
+    if (done) return;
+    if (err || !addrs || !addrs.length) {
+      done = true; clearTimeout(timer);
+      if (cb) cb({ status: 500, reason: 'DNS resolution failed: ' + (err ? err.code : 'no addresses'), headers: {}, content: '' });
+      return;
+    }
+    const ip = addrs[0];
+    const sock = new net.Socket();
+    let buf = '';
+    let responded = false;
+
+    sock.setTimeout(timeoutMs || 15000);
+    sock.connect(SIP_PORT, ip, () => {
+      sock.write(msgStr);
+    });
+
+    sock.on('data', (data) => {
+      buf += data.toString('binary');
+      // Check if we have a complete SIP message (by Content-Length)
+      if (!responded) {
+        const rs = parseSipResponse(buf);
+        if (rs) {
+          responded = true; done = true; clearTimeout(timer);
+          try { sock.end(); } catch(e) {}
+          if (cb) cb(rs);
+        }
+      }
+    });
+
+    sock.on('error', (e) => {
+      if (done) return; done = true; clearTimeout(timer);
+      try { sock.destroy(); } catch(ex) {}
+      if (cb) cb({ status: 500, reason: 'TCP error: ' + e.message, headers: {}, content: '' });
+    });
+
+    sock.on('close', () => {
+      if (!responded && !done) {
+        done = true; clearTimeout(timer);
+        const rs = parseSipResponse(buf);
+        if (rs) { if (cb) cb(rs); }
+        else if (cb) cb({ status: 500, reason: 'Connection closed without valid response', headers: {}, content: '' });
+      }
+    });
+
+    sock.on('timeout', () => {
+      if (!responded && !done) {
+        done = true; clearTimeout(timer);
+        try { sock.destroy(); } catch(ex) {}
+        if (cb) cb({ status: 408, reason: 'TCP timeout', headers: {}, content: '' });
+      }
+    });
+  });
+}
 
 function stripQuotes(s) {
   if (typeof s === 'string' && s.length >= 2 && s[0] === '"' && s[s.length - 1] === '"') return s.slice(1, -1);
@@ -112,30 +193,12 @@ wss.on('connection', (ws) => {
   function sendJSON(obj) { try { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); } catch(e) {} }
   function sendDebug(msg) { sendJSON({ type: 'debug', msg: String(msg) }); }
 
-  function safeSipSend(req, cb, timeoutMs) {
-    let done = false;
-    const timer = setTimeout(() => {
-      if (done) return;
-      done = true;
-      console.error('SIP timeout for', req.method, req.uri);
-      sendDebug('SIP timeout para ' + req.method + ' ' + req.uri);
-      if (cb) cb({ status: 408, reason: 'Request Timeout', headers: {}, content: '' });
-    }, timeoutMs || 15000);
-    const wrappedCb = (rs) => {
-      if (done) return;
-      done = true; clearTimeout(timer);
+  function safeSipSend(req, cb) {
+    sendDebug('SIP enviando ' + req.method + ' ' + req.uri);
+    sendSipTcp(req, (rs) => {
+      sendDebug('SIP respuesta ' + rs.status + ' ' + (rs.reason || ''));
       if (cb) cb(rs);
-    };
-    try {
-      sendDebug('SIP enviando ' + req.method + ' ' + req.uri);
-      sip.send(req, wrappedCb);
-    } catch(e) {
-      if (done) return;
-      done = true; clearTimeout(timer);
-      console.error('safeSipSend error:', e.message, e.stack);
-      sendDebug('Error SIP: ' + e.message);
-      if (cb) cb({ status: 500, reason: 'Server error: ' + e.message, headers: {}, content: '' });
-    }
+    });
   }
 
   // ---- Audio relay ----
