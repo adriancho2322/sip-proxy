@@ -203,7 +203,7 @@ function doRegister() {
   return callId;
 }
 
-function doAuthRegister(authHeader) {
+function doAuthRegister(authHeader, isProxy) {
   const user = getVal('sipUser');
   const pass = getVal('sipPass');
   const domain = getVal('sipDomain');
@@ -219,6 +219,9 @@ function doAuthRegister(authHeader) {
 
   const resp = digestResponse('REGISTER', 'sip:' + domain, user, realm, pass, nonce);
 
+  const authName = isProxy ? 'Proxy-Authorization' : 'Authorization';
+  const authValue = 'Digest username="' + user + '", realm="' + realm + '", nonce="' + nonce + '", uri="sip:' + domain + '", response="' + resp + '"';
+
   const headers = {
     'Via': 'SIP/2.0/TCP 0.0.0.0;branch=' + branch + ';rport',
     'From': '<' + from + '>;tag=' + tag,
@@ -227,8 +230,8 @@ function doAuthRegister(authHeader) {
     'CSeq': cseq + ' REGISTER',
     'Contact': '<' + from + '>',
     'Max-Forwards': '70',
-    'Proxy-Authorization': 'Digest username="' + user + '", realm="' + realm + '", nonce="' + nonce + '", uri="sip:' + domain + '", response="' + resp + '"',
   };
+  headers[authName] = authValue;
 
   sendSip(createSipMessage('REGISTER', 'sip:' + domain, headers));
 }
@@ -238,14 +241,14 @@ function handleSipResponse(raw) {
   log('← ' + msg.status + ' ' + msg.reason);
 
   // --- REGISTER responses ---
-  if (msg.status === 407 && !registered) {
-    const authHdr = msg.headers['proxy-authenticate'];
+  if ((msg.status === 401 || msg.status === 407) && !registered) {
+    const authHdr = msg.headers['proxy-authenticate'] || msg.headers['www-authenticate'];
     if (authHdr) {
       log('Autenticando registro...');
-      doAuthRegister(authHdr);
+      doAuthRegister(authHdr, msg.status === 407);
     } else {
-      log('No Proxy-Authenticate header', 'error');
-      registered = true; // intentar de todas formas
+      log('No auth header', 'error');
+      registered = true;
       document.getElementById('callCard').style.display = 'block';
       document.getElementById('btnConnect').textContent = '🔄 Reconectar';
     }
