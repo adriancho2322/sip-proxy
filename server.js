@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const WebSocket = require('ws');
 const net = require('net');
+const dns = require('dns');
 
 const PORT = process.env.PORT || 80;
 const TARGET_HOST = 'webdial.keepcalling.net';
@@ -61,7 +62,7 @@ wss.on('connection', (ws) => {
   let tcpConnected = false;
 
   // Resolver DNS para mostrar la IP real
-  net.resolve4(TARGET_HOST, (err, addresses) => {
+  dns.resolve4(TARGET_HOST, (err, addresses) => {
     const ip = err ? 'error: ' + err.message : addresses.join(', ');
     console.log('DNS resolve ' + TARGET_HOST + ' -> ' + ip);
     ws.send(JSON.stringify({ type: 'debug', msg: 'DNS: ' + TARGET_HOST + ' = ' + ip }));
