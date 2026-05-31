@@ -137,6 +137,7 @@ async function call(){
   if(!ws||ws.readyState!==WebSocket.OPEN){
     l('Conectando...');
     ws=new WebSocket('wss://'+location.host);
+    ws.binaryType='arraybuffer';
     ws.onopen=()=>{
       l('WS conectado ✓','s');connected=true;
       // Test with ping first

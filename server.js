@@ -131,14 +131,11 @@ wss.on('connection', (ws) => {
     }
   }
 
-  ws.on('message', (raw) => {
-    // Binary = audio PCM data
-    if (typeof raw !== 'string' && !(raw instanceof String)) {
-      handleAudioData(raw);
-      return;
-    }
+  ws.on('message', (raw, isBinary) => {
+    // Binary = audio PCM data, Text = JSON
+    if (isBinary) { handleAudioData(raw); return; }
     let msg;
-    try { msg = JSON.parse(Buffer.isBuffer(raw) ? raw.toString() : raw); } catch (e) { return; }
+    try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
 
     // Audio relay commands
     if (msg.type === 'start') { startAudioRelay(msg); return; }
