@@ -2,39 +2,27 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
+const net = require('net');
 const WebSocket = require('ws');
-const sip = require('sip');
-const digest = require('sip/digest');
+const crypto = require('crypto');
 
 const PORT = process.env.PORT || 80;
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const SIP_HOST = 'webdial.keepcalling.net';
+const SIP_PORT = 5060;
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript',
   '.css': 'text/css',
-  '.png': 'image/png',
   '.ico': 'image/x-icon',
 };
 
 const server = http.createServer((req, res) => {
   if (req.url === '/') {
     serveFile('index.html', res);
-  } else if (req.url.startsWith('/tts?')) {
-    const params = new URL(req.url, 'http://localhost').searchParams;
-    const text = params.get('text');
-    if (!text) { res.writeHead(400); res.end('Missing text'); return; }
-    const lang = params.get('tl') || 'es';
-    const ttsUrl = 'https://translate.google.com/translate_tts?ie=UTF-8&q=' + encodeURIComponent(text) + '&tl=' + lang + '&client=tw-ob';
-    https.get(ttsUrl, (ttsRes) => {
-      res.writeHead(ttsRes.statusCode, {
-        'Content-Type': ttsRes.headers['content-type'] || 'audio/mpeg',
-      });
-      ttsRes.pipe(res);
-    }).on('error', (e) => {
-      res.writeHead(500); res.end('TTS error: ' + e.message);
-    });
+  } else if (req.url === '/jssip.js') {
+    serveFile('jssip.js', res);
   } else {
     res.writeHead(404);
     res.end('Not found');
@@ -55,267 +43,63 @@ function serveFile(name, res) {
   });
 }
 
+// WebSocket SIP proxy: cada conexión WS -> TCP al proveedor SIP
 const wss = new WebSocket.Server({ server });
 
-function rstring() { return Math.floor(Math.random() * 1e12).toString(); }
-
-// Iniciar stack SIP global
-let sipStarted = false;
-function ensureSipStack() {
-  if (sipStarted) return;
-  try {
-    sip.start({ tcp: true, udp: false, port: 0 }, function(rq) {
-      sip.send(sip.makeResponse(rq, 404, 'Not Found'));
-    });
-    sipStarted = true;
-    console.log('SIP stack started');
-  } catch (e) {
-    console.error('SIP stack error:', e.message);
-  }
-}
-
 wss.on('connection', (ws) => {
-  let sessionId = null;
-  let sipAccount = null;
-  let dialConfig = null;
-  let callActive = false;
+  const tcp = net.createConnection(SIP_PORT, SIP_HOST, () => {
+    console.log('TCP connected to ' + SIP_HOST + ':' + SIP_PORT);
+  });
 
-  function sendJSON(obj) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(obj));
-    }
-  }
-
-  function sendDebug(msg) {
-    sendJSON({ type: 'debug', msg: msg });
-  }
-
-  function sendBCEvent(state) {
-    sendJSON({ BCEvent: state });
-  }
-
-  function sendReqResponse(reqId, data) {
-    sendJSON({ reqID: reqId, reqData: data });
-  }
-
-  sendDebug('Servidor JSON API listo');
-  sendJSON({ HaveSessionQ: true });
-
-  function handleMakeCall(from, to) {
-    sendDebug('Iniciando llamada SIP: ' + from + ' -> ' + to);
-    ensureSipStack();
-
-    const domain = (sipAccount && sipAccount.sipDomain) || 'webdial.keepcalling.net';
-    const user = (sipAccount && sipAccount.sipUserName) || from;
-    const pass = (sipAccount && sipAccount.sipPassword) || '';
-    const fromUri = 'sip:' + user + '@' + domain;
-    const toUri = 'sip:' + to + '@' + domain;
-    const contactUri = 'sip:' + user + '@' + domain;
-    let authSession = null;
-
-    sendDebug('Usuario SIP: ' + user + ' @ ' + domain);
-
-    function sendInvite() {
-      sip.send({
-        method: 'INVITE',
-        uri: toUri,
-        headers: {
-          to: { uri: toUri },
-          from: { uri: fromUri, params: { tag: rstring() } },
-          'call-id': rstring(),
-          cseq: { method: 'INVITE', seq: Math.floor(Math.random() * 1e5) },
-          'content-type': 'application/sdp',
-          contact: [{ uri: contactUri }],
-          'max-forwards': '70'
-        },
-        content: ''
-      }, handleResponse);
-    }
-
-    function handleResponse(rs) {
-      const statusStr = rs.status + ' ' + (rs.reason || '');
-      sendDebug('SIP response: ' + statusStr);
-      // Debug: mostrar headers relevantes
-      const authH = rs.headers['proxy-authenticate'];
-      const wwwAuth = rs.headers['www-authenticate'];
-      const allKeys = Object.keys(rs.headers).join(', ');
-      sendDebug('Headers: ' + allKeys);
-      sendDebug('proxy-auth: ' + (authH ? (typeof authH === 'object' ? JSON.stringify(authH) : authH) : 'none'));
-      sendDebug('www-auth: ' + (wwwAuth ? (typeof wwwAuth === 'object' ? JSON.stringify(wwwAuth) : wwwAuth) : 'none'));
-      if (rs.status === 407) {
-        sendDebug('Autenticación requerida, enviando credenciales...');
-
-        // Obtener el challenge del header proxy-authenticate
-        const challenges = rs.headers['proxy-authenticate'];
-        const challenge = Array.isArray(challenges) ? challenges[0] : challenges;
-        if (!challenge) {
-          sendDebug('No se encontró challenge de autenticación');
-          sendBCEvent({ NoCall: {} });
-          return;
-        }
-
-        // Extraer parámetros (la librería ya los parsea, pero pueden tener comillas)
-        function stripQuotes(s) {
-          if (typeof s === 'string' && s.length >= 2 && s[0] === '"' && s[s.length - 1] === '"')
-            return s.slice(1, -1);
-          return s;
-        }
-
-        const realm = stripQuotes(challenge.realm);
-        const nonce = stripQuotes(challenge.nonce);
-        const algorithm = stripQuotes(challenge.algorithm) || 'MD5';
-        const opaque = stripQuotes(challenge.opaque);
-        const uriStr = toUri;
-
-        // Calcular digest RFC 2069 (sin qop)
-        // HA1 = MD5(user:realm:password)
-        const ha1 = crypto.createHash('md5').update(user + ':' + realm + ':' + pass).digest('hex');
-        // HA2 = MD5(method:uri)
-        const ha2 = crypto.createHash('md5').update('INVITE' + ':' + uriStr).digest('hex');
-        // response = MD5(HA1:nonce:HA2)
-        const response = crypto.createHash('md5').update(ha1 + ':' + nonce + ':' + ha2).digest('hex');
-
-        sendDebug('Digest realm=' + realm + ' nonce=' + nonce);
-
-        const req = {
-          method: 'INVITE',
-          uri: uriStr,
-          headers: {
-            to: { uri: toUri },
-            from: { uri: fromUri, params: { tag: rstring() } },
-            'call-id': rs.headers['call-id'] || rstring(),
-            cseq: { method: 'INVITE', seq: Math.floor(Math.random() * 1e5) },
-            'content-type': 'application/sdp',
-            contact: [{ uri: contactUri }],
-            'max-forwards': '70',
-            'proxy-authorization': [{
-              scheme: 'Digest',
-              username: user,
-              realm: realm,
-              nonce: nonce,
-              uri: uriStr,
-              algorithm: algorithm,
-              response: response,
-              opaque: opaque || undefined
-            }]
-          },
-          content: ''
-        };
-
-        sip.send(req, function(rs2) {
-          sendDebug('SIP auth response: ' + rs2.status + ' ' + (rs2.reason || ''));
-          if (rs2.status >= 200 && rs2.status < 300) {
-            sendBCEvent({ Connected: {} });
-            callActive = true;
-            sip.send({
-              method: 'ACK',
-              uri: rs2.headers.contact[0].uri,
-              headers: {
-                to: rs2.headers.to,
-                from: rs2.headers.from,
-                'call-id': rs2.headers['call-id'],
-                cseq: { method: 'ACK', seq: rs2.headers.cseq.seq },
-                via: []
-              }
-            });
-          } else if (rs2.status >= 100 && rs2.status < 200) {
-            sendBCEvent({ RingingCallee: {} });
-          } else {
-            sendBCEvent({ NoCall: {} });
-            callActive = false;
-            sendDebug('Llamada falló: ' + rs2.status + ' ' + (rs2.reason || ''));
-          }
-        });
-        return;
-      }
-      if (rs.status >= 200 && rs.status < 300) {
-        sendBCEvent({ Connected: {} });
-        callActive = true;
-        sip.send({
-          method: 'ACK',
-          uri: rs.headers.contact[0].uri,
-          headers: {
-            to: rs.headers.to,
-            from: rs.headers.from,
-            'call-id': rs.headers['call-id'],
-            cseq: { method: 'ACK', seq: rs.headers.cseq.seq },
-            via: []
-          }
-        });
-      } else if (rs.status >= 100 && rs.status < 200) {
-        sendBCEvent({ RingingCallee: {} });
-      } else {
-        sendBCEvent({ NoCall: {} });
-        callActive = false;
-        sendDebug('Llamada falló: ' + rs.status + ' ' + (rs.reason || ''));
-      }
-    }
-
-    sendInvite();
-  }
+  let tcpBuffer = '';
 
   ws.on('message', (raw) => {
-    const str = Buffer.isBuffer(raw) ? raw.toString() : raw;
-    let msg;
-    try { msg = JSON.parse(str); } catch (e) { return; }
+    const data = typeof raw === 'string' ? raw : raw.toString();
+    console.log('WS->TCP:', data.trimEnd());
+    tcp.write(data);
+  });
 
-    if (msg.type === 'ping') { sendJSON({ type: 'pong' }); return; }
+  function parseContentLength(headers) {
+    const m = headers.match(/^Content-Length:\s*(\d+)/im);
+    return m ? parseInt(m[1], 10) : 0;
+  }
 
-    if (msg.HaveSessionQ) {
-      sendJSON({ ContinueSession: sessionId || 'new-session' });
-      return;
-    }
-
-    if (msg.NewSession) {
-      sessionId = 'sess-' + rstring();
-      sendDebug('Sesión iniciada: ' + sessionId);
-      sendJSON({ StartSession: sessionId });
-      return;
-    }
-
-    if (msg.reqData) {
-      const data = msg.reqData;
-
-      if (data.SetSIPAccount) {
-        sipAccount = data.SetSIPAccount;
-        sendDebug('Cuenta SIP configurada: ' + sipAccount.sipUserName);
-        sendReqResponse(msg.reqID, { RequestConf: { type: 'SIPAccount', status: 'ok' } });
-        return;
+  tcp.on('data', (chunk) => {
+    tcpBuffer += chunk.toString();
+    while (true) {
+      const idx = tcpBuffer.indexOf('\r\n\r\n');
+      if (idx === -1) break;
+      const headerPart = tcpBuffer.substring(0, idx);
+      const clen = parseContentLength(headerPart);
+      const totalLen = idx + 4 + clen;
+      if (tcpBuffer.length < totalLen) break;
+      const msg = tcpBuffer.substring(0, totalLen);
+      tcpBuffer = tcpBuffer.substring(totalLen);
+      console.log('TCP->WS:', msg.trimEnd());
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(msg);
       }
-
-      if (data.SetDialConfig) {
-        dialConfig = data.SetDialConfig;
-        sendDebug('Config de llamada: ' + data.SetDialConfig.phoneNum);
-        sendReqResponse(msg.reqID, { RequestConf: { type: 'DialConfig', status: 'ok' } });
-        return;
-      }
-
-      if (data.GetSnapshot) {
-        sendReqResponse(msg.reqID, { Snapshot: { callActive: callActive } });
-        return;
-      }
-
-      if (data.BCRequest && data.BCRequest.MakeCall) {
-        const to = data.BCRequest.MakeCall.destNum;
-        const from = dialConfig ? dialConfig.phoneNum : 'anon';
-        sendBCEvent({ Initiated: {} });
-        handleMakeCall(from, to);
-        return;
-      }
-
-      if (data.BCRequest && data.BCRequest.Hangup) {
-        sendDebug('Colgando llamada');
-        sendBCEvent({ NoCall: {} });
-        callActive = false;
-        return;
-      }
-
-      sendReqResponse(msg.reqID, { RequestConf: { status: 'ok' } });
     }
   });
 
+  tcp.on('close', () => {
+    console.log('TCP closed');
+    ws.close();
+  });
+
+  tcp.on('error', (err) => {
+    console.error('TCP error:', err.message);
+    ws.close();
+  });
+
   ws.on('close', () => {
-    sendDebug('Cliente desconectado');
+    console.log('WS closed');
+    tcp.destroy();
+  });
+
+  ws.on('error', (err) => {
+    console.error('WS error:', err.message);
+    tcp.destroy();
   });
 });
 

@@ -1,328 +1,498 @@
 <!DOCTYPE html>
-<html lang="es">
+<html>
 <head>
-<meta charset="UTF-8">
-<meta http-equiv="X-UA-Compatible" content="IE=edge">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SIP Caller</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/blueimp-md5/2.19.0/js/md5.min.js"></script>
 <style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body {
-  font-family: Arial, Helvetica, sans-serif;
-  background: #0a0c10; color: #e2e8f0; min-height: 100vh;
-  display: -webkit-box; display: -ms-flexbox; display: flex;
-  -webkit-box-align: center; -ms-flex-align: center; align-items: center;
-  -webkit-box-pack: center; -ms-flex-pack: center; justify-content: center;
-}
-body::before {
-  content: ''; position: fixed; top:0;left:0;right:0;bottom:0;
-  background-image: linear-gradient(rgba(0,229,160,.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0,229,160,.04) 1px, transparent 1px);
-  background-size: 48px 48px; pointer-events: none;
-}
-.card {
-  position: relative; background: #111318; border: 1px solid #1e2330;
-  border-radius: 16px; padding: 36px; width: 360px; max-width: 95vw;
-  box-shadow: 0 30px 80px rgba(0,0,0,.6);
-}
-.card::before {
-  content: ''; position: absolute; top: 0; left: 36px; right: 36px; height: 1px;
-  background: linear-gradient(90deg, transparent, #00e5a0, transparent); opacity: .5;
-}
-.header {
-  display: -webkit-box; display: -ms-flexbox; display: flex;
-  -webkit-box-align: center; -ms-flex-align: center; align-items: center;
-  gap: 12px; margin-bottom: 28px;
-}
-.logo-icon {
-  width:36px; height:36px; background:linear-gradient(135deg,#0088ff,#00e5a0);
-  border-radius:10px; display:-webkit-box; display:-ms-flexbox; display:flex;
-  -webkit-box-align:center; -ms-flex-align:center; align-items:center;
-  -webkit-box-pack:center; -ms-flex-pack:center; justify-content:center;
-  font-size:17px; -ms-flex-negative:0; flex-shrink:0;
-}
-.logo-text { font-size:18px; font-weight:bold; }
-.logo-text span { color:#00e5a0; }
-.status-pill {
-  margin-left:auto; display:-webkit-box; display:-ms-flexbox; display:flex;
-  -webkit-box-align:center; -ms-flex-align:center; align-items:center; gap:6px;
-  font-family:monospace; font-size:10px; color:#5a6480;
-  background:rgba(255,255,255,.04); border:1px solid #1e2330;
-  border-radius:20px; padding:4px 10px;
-}
-.status-dot { width:6px; height:6px; border-radius:50%; background:#5a6480; }
-.pill-ok   { color:#00e5a0; border-color:rgba(0,229,160,.3); }
-.pill-ok   .status-dot { background:#00e5a0; }
-.pill-busy { color:#0088ff; border-color:rgba(0,136,255,.3); }
-.pill-busy .status-dot { background:#0088ff; }
-.pill-call { color:#00e5a0; border-color:rgba(0,229,160,.4); }
-.pill-call .status-dot { background:#00e5a0; }
-.pill-err  { color:#ff3b5c; border-color:rgba(255,59,92,.3); }
-.pill-err  .status-dot { background:#ff3b5c; }
-@-webkit-keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
-@keyframes         blink { 0%,100%{opacity:1} 50%{opacity:.3} }
-.pill-ok .status-dot, .pill-busy .status-dot, .pill-call .status-dot {
-  -webkit-animation:blink 1.5s infinite; animation:blink 1.5s infinite;
-}
-label {
-  display:block; font-size:10px; font-family:monospace; color:#5a6480;
-  letter-spacing:1.5px; text-transform:uppercase; margin-bottom:7px;
-}
-.field { margin-bottom:18px; }
-.input-wrap { position:relative; }
-.input-icon {
-  position:absolute; left:13px; top:50%;
-  -webkit-transform:translateY(-50%); -ms-transform:translateY(-50%); transform:translateY(-50%);
-  color:#5a6480; font-size:14px; pointer-events:none;
-}
-input[type="tel"] {
-  width:100%; background:rgba(255,255,255,.03); border:1px solid #1e2330;
-  border-radius:10px; padding:12px 14px 12px 38px; color:#e2e8f0;
-  font-family:monospace; font-size:15px; letter-spacing:1px; outline:none;
-  -webkit-appearance:none; -moz-appearance:none; appearance:none;
-}
-input[type="tel"]:focus { border-color:rgba(0,229,160,.5); background:rgba(0,229,160,.03); }
-.call-state {
-  font-family:monospace; font-size:12px; text-align:center; color:#0088ff;
-  letter-spacing:1px; min-height:20px; margin:14px 0 6px;
-}
-.btn-row {
-  display:-webkit-box; display:-ms-flexbox; display:flex; gap:12px; margin-top:8px;
-}
-.btn {
-  -webkit-box-flex:1; -ms-flex:1; flex:1; border:none; border-radius:11px;
-  padding:13px; font-family:Arial,Helvetica,sans-serif; font-weight:bold;
-  font-size:14px; cursor:pointer;
-  -webkit-transition:opacity .2s,-webkit-transform .1s; transition:opacity .2s,transform .1s;
-}
-.btn:active { -webkit-transform:scale(.96); -ms-transform:scale(.96); transform:scale(.96); }
-.btn:disabled { opacity:.35; cursor:not-allowed; -webkit-transform:none; -ms-transform:none; transform:none; }
-.btn-connect { background:linear-gradient(135deg,#00c87a,#00e5a0); color:#003020; }
-.btn-hangup  { background:linear-gradient(135deg,#c02040,#ff3b5c); color:#fff; }
-.log {
-  margin-top:18px; background:rgba(0,0,0,.35); border:1px solid #1e2330;
-  border-radius:10px; padding:10px 13px; font-family:monospace; font-size:11px;
-  color:#5a6480; min-height:34px; max-height:90px; overflow-y:auto; line-height:1.65;
-  word-break:break-all;
-}
-.log .ok  { color:#00e5a0; }
-.log .err { color:#ff3b5c; }
-.log .inf { color:#0088ff; }
-.log::-webkit-scrollbar { width:4px; }
-.log::-webkit-scrollbar-thumb { background:#1e2330; border-radius:4px; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; background: #111; color: #eee; padding: 20px; max-width: 480px; margin: auto; }
+h1 { font-size: 1.3rem; margin-bottom: 16px; color: #0af; }
+.card { background: #1a1a2e; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+label { display: block; font-size: 0.8rem; color: #888; margin: 10px 0 4px; }
+input { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #333; background: #222; color: #eee; font-size: 1rem; }
+button { padding: 12px 24px; border-radius: 8px; border: none; font-size: 1rem; cursor: pointer; font-weight: 600; margin: 4px; }
+.btn-call { background: #0a4; color: #fff; width: 100%; }
+.btn-call:disabled { background: #333; color: #666; }
+.btn-hangup { background: #c33; color: #fff; }
+.btn-hangup:disabled { background: #333; color: #666; }
+#status { background: #0a0a1a; border-radius: 8px; padding: 12px; font-size: 0.8rem; font-family: monospace; max-height: 200px; overflow-y: auto; white-space: pre-wrap; color: #0f0; }
+#callerId { color: #ffa; font-size: 1rem; margin: 8px 0; }
+.error { color: #f44; }
+.info { color: #4af; }
+.success { color: #0a4; }
 </style>
 </head>
 <body>
+
+<h1>☎ SIP Caller</h1>
+
 <div class="card">
-  <div class="header">
-    <div class="logo-icon">&#128222;</div>
-    <div class="logo-text">SIP<span>call</span></div>
-    <div class="status-pill" id="pill">
-      <div class="status-dot"></div>
-      <span id="pillTxt">conectando&hellip;</span>
-    </div>
+  <label>WS Proxy</label>
+  <input id="wsUrl" value="wss://sip-proxy.onrender.com/ws">
+
+  <label>Usuario SIP</label>
+  <input id="sipUser" value="wes5169805709">
+
+  <label>Password SIP</label>
+  <input id="sipPass" type="password" value="138e587867f90ba6c5c5fb9c16b73cc3">
+
+  <label>Dominio SIP</label>
+  <input id="sipDomain" value="webdial.keepcalling.net">
+
+  <button class="btn-call" id="btnConnect" onclick="connect()">Conectar</button>
+</div>
+
+<div class="card" id="callCard" style="display:none">
+  <label>Número a llamar</label>
+  <input id="destNum" placeholder="Ej: 576028998200">
+  <div style="margin-top: 10px;">
+    <button class="btn-call" id="btnCall" onclick="makeCall()">📞 Llamar</button>
+    <button class="btn-hangup" id="btnHangup" onclick="hangup()" disabled>Colgar</button>
   </div>
+  <div id="callerId"></div>
+</div>
 
-  <div class="field">
-    <label>N&uacute;mero Origen (tu tel&eacute;fono)</label>
-    <div class="input-wrap">
-      <span class="input-icon">&#128100;</span>
-      <input type="tel" id="fromNum" placeholder="ej. +15551234567" autocomplete="off">
-    </div>
-  </div>
-
-  <div class="field">
-    <label>N&uacute;mero Destino</label>
-    <div class="input-wrap">
-      <span class="input-icon">&#128242;</span>
-      <input type="tel" id="toNum" placeholder="ej. +15559876543" autocomplete="off">
-    </div>
-  </div>
-
-  <div class="call-state" id="callState"></div>
-
-  <div class="btn-row">
-    <button class="btn btn-connect" id="btnCall" onclick="makeCall()" disabled="disabled">&#9654; Conectar</button>
-    <button class="btn btn-hangup"  id="btnHangup" onclick="hangup()" disabled="disabled">&#10005; Finalizar</button>
-  </div>
-
-  <div class="log" id="log"><span class="inf">&#8250; Iniciando&hellip;</span></div>
+<div class="card">
+  <div id="status">Listo</div>
 </div>
 
 <script>
-(function() {
-  'use strict';
+// ---- Estado ----
+let ws = null;
+let pc = null;
+let localStream = null;
+let registered = false;
+let callActive = false;
+let currentCallId = null;
+let currentFromTag = null;
+let dialog = {};
 
-  var _u = atob('d2VzNTE2OTgwNTcwOQ==');
-  var _p = atob('MTM4ZTU4Nzg2N2Y5MGJhNmM1YzVmYjljMTZiNzNjYzM=');
-  var _s = atob('d2ViZGlhbC5rZWVwY2FsbGluZy5uZXQ=');
-  var SERVER = 'wss://sip-proxy.onrender.com';
+function log(msg, type) {
+  const el = document.getElementById('status');
+  const cls = type || 'info';
+  el.innerHTML += '<span class="' + cls + '">› </span>' + msg + '\n';
+  el.scrollTop = el.scrollHeight;
+}
 
-  var ws = null, sessionID = null, reqID = 0, callActive = false, reconnTimer = null;
+function getVal(id) { return document.getElementById(id).value.trim(); }
 
-  function g(id) { return document.getElementById(id); }
+// ---- Util ----
+function makeBranch() {
+  return 'z9hG4bK' + Math.random().toString(16).slice(2, 14);
+}
 
-  function addLog(msg, cls) {
-    var box = g('log');
-    var d = document.createElement('div');
-    if (cls) { d.className = cls; }
-    d.appendChild(document.createTextNode('\u203a ' + msg));
-    box.appendChild(d);
-    box.scrollTop = box.scrollHeight;
+function makeTag() {
+  return Math.random().toString(16).slice(2, 14);
+}
+
+function makeCallId() {
+  return Math.random().toString(16).slice(2, 18) + '@browser';
+}
+
+function parseSipResponse(msg) {
+  const lines = msg.split('\r\n');
+  const statusLine = lines[0];
+  const sp1 = statusLine.indexOf(' ');
+  const sp2 = statusLine.lastIndexOf(' ');
+  const version = statusLine.slice(0, sp1);
+  const status = parseInt(statusLine.slice(sp1 + 1, sp2), 10);
+  const reason = statusLine.slice(sp2 + 1);
+  const headers = {};
+  let i = 1;
+  while (i < lines.length && lines[i] !== '') {
+    const hdr = lines[i];
+    const colon = hdr.indexOf(':');
+    if (colon !== -1) {
+      const name = hdr.slice(0, colon).toLowerCase();
+      const value = hdr.slice(colon + 1).trim();
+      if (headers[name]) {
+        if (!Array.isArray(headers[name])) headers[name] = [headers[name]];
+        headers[name].push(value);
+      } else {
+        headers[name] = value;
+      }
+    }
+    i++;
   }
+  const bodyStart = msg.indexOf('\r\n\r\n') + 4;
+  const body = bodyStart < msg.length ? msg.slice(bodyStart) : '';
+  return { version, status, reason, headers, body };
+}
 
-  function setStatus(txt, cls) {
-    var pill = g('pill');
-    pill.className = 'status-pill' + (cls ? ' ' + cls : '');
-    g('pillTxt').textContent = txt;
-  }
-
-  function setCallState(txt) { g('callState').textContent = txt; }
-
-  function nextID() { reqID += 1; return String(reqID); }
-
-  function wsSend(obj) {
-    if (ws && ws.readyState === 1) {
-      try { ws.send(JSON.stringify(obj)); } catch (e) { addLog('Error envio: ' + e.message, 'err'); }
+function createSipMessage(method, uri, headers, body) {
+  let msg = method + ' ' + uri + ' SIP/2.0\r\n';
+  for (const [name, value] of Object.entries(headers)) {
+    if (Array.isArray(value)) {
+      for (const v of value) msg += name + ': ' + v + '\r\n';
+    } else {
+      msg += name + ': ' + value + '\r\n';
     }
   }
-
-  function sendReq(data) { wsSend({ reqID: nextID(), reqData: data }); }
-
-  function sendCallerCfg(phone) {
-    sendReq({ SetDialConfig: { phoneNum: phone, callerID: null, callerName: null, extraDialConfig: null } });
-  }
-
-  var STATES = {
-    NoCall:          { txt: '',                        cls: 'pill-ok',   call: false },
-    Initiated:       { txt: 'Llamando tu telefono...', cls: 'pill-busy', call: true  },
-    RingingCaller:   { txt: 'Sonando tu telefono...',  cls: 'pill-busy', call: true  },
-    CallerIdle:      { txt: 'Telefono listo',          cls: 'pill-ok',   call: true  },
-    InitiatedCallee: { txt: 'Marcando destino...',     cls: 'pill-busy', call: true  },
-    RingingCallee:   { txt: 'Sonando destino...',      cls: 'pill-busy', call: true  },
-    Connected:       { txt: 'LLAMADA CONECTADA',       cls: 'pill-call', call: true  }
-  };
-
-  function handleCallEvent(state) {
-    var key = (state && typeof state === 'object') ? Object.keys(state)[0] : 'NoCall';
-    var s = STATES[key] || { txt: key, cls: 'pill-busy', call: callActive };
-    setCallState(s.txt);
-    setStatus(key, s.cls);
-    callActive = s.call;
-    addLog('Estado: ' + key, s.cls === 'pill-call' ? 'ok' : 'inf');
-    g('btnCall').disabled   = s.call;
-    g('btnHangup').disabled = !s.call;
-  }
-
-  function onMessage(evt) {
-    var raw = (evt && evt.data) ? String(evt.data) : '';
-    var msg;
-    try { msg = JSON.parse(raw); } catch (e) { return; }
-    if (!msg || typeof msg !== 'object') { return; }
-
-    if (msg.type === 'debug') { addLog(msg.msg, 'inf'); return; }
-
-    if (Object.prototype.hasOwnProperty.call(msg, 'HaveSessionQ')) {
-      addLog('Handshake -> enviando credenciales', 'inf');
-      wsSend({ NewSession: { majorVersion: 1, midVersion: 0, minVersion: 0 } });
-      return;
-    }
-    if (msg.StartSession) {
-      sessionID = msg.StartSession;
-      addLog('Sesion iniciada \u2713', 'ok');
-      setStatus('listo', 'pill-ok');
-      sendReq({ SetSIPAccount: {
-        sipUserName: _u, sipPassword: _p, sipDomain: _s,
-        sipDirectMedia: false, sipEnableRPID: true, sipExtraConfig: null
-      }});
-      var from = g('fromNum').value.replace(/\s/g, '');
-      if (from) { sendCallerCfg(from); }
-      sendReq({ GetSnapshot: [] });
-      g('btnCall').disabled = false;
-      return;
-    }
-    if (msg.ContinueSession) {
-      sessionID = msg.ContinueSession;
-      addLog('Sesion continuada \u2713', 'ok');
-      setStatus('listo', 'pill-ok');
-      sendReq({ GetSnapshot: [] });
-      g('btnCall').disabled = false;
-      return;
-    }
-    if (msg.BCEvent)     { handleCallEvent(msg.BCEvent); return; }
-    if (msg.RequestConf) { return; }
-  }
-
-  function connect() {
-    if (reconnTimer) { clearTimeout(reconnTimer); reconnTimer = null; }
-    if (ws) { try { ws.close(); } catch (e) {} ws = null; }
-
-    if (typeof WebSocket === 'undefined') {
-      addLog('Tu navegador no soporta WebSocket', 'err');
-      setStatus('sin soporte', 'pill-err');
-      return;
-    }
-
-    setStatus('conectando...', '');
-    try { ws = new WebSocket(SERVER); }
-    catch (e) {
-      addLog('Error al conectar: ' + e.message, 'err');
-      setStatus('error', 'pill-err');
-      reconnTimer = setTimeout(connect, 5000);
-      return;
-    }
-
-    ws.onopen = function() {
-      addLog('WebSocket conectado \u2713', 'ok');
-      setStatus('conectado', 'pill-ok');
-    };
-
-    ws.onmessage = onMessage;
-
-    ws.onerror = function() { addLog('Error WebSocket', 'err'); };
-
-    ws.onclose = function(e) {
-      sessionID  = null;
-      callActive = false;
-      g('btnCall').disabled   = true;
-      g('btnHangup').disabled = true;
-      setStatus('desconectado', 'pill-err');
-      setCallState('');
-      addLog('Desconectado (cod.' + (e ? e.code : '?') + '). Reintentando...', 'err');
-      reconnTimer = setTimeout(connect, 5000);
-    };
-  }
-
-  window.makeCall = function() {
-    var from = g('fromNum').value.replace(/\s/g, '');
-    var to   = g('toNum').value.replace(/\s/g, '');
-    if (!from)      { addLog('Ingresa tu numero de telefono (origen)', 'err'); return; }
-    if (!to)        { addLog('Ingresa el numero destino', 'err'); return; }
-    if (!sessionID) { addLog('Sin sesion activa. Espera...', 'err'); return; }
-    sendCallerCfg(from);
-    sendReq({ BCRequest: { MakeCall: { destNum: to, destName: null } } });
-    addLog('Iniciando llamada a ' + to, 'inf');
-    g('btnCall').disabled   = true;
-    g('btnHangup').disabled = false;
-  };
-
-  window.hangup = function() {
-    sendReq({ BCRequest: { Hangup: [] } });
-    addLog('Colgando...', 'inf');
-    callActive = false;
-    g('btnHangup').disabled = true;
-    g('btnCall').disabled   = false;
-    setCallState('');
-    if (sessionID) { setStatus('listo', 'pill-ok'); }
-  };
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', connect);
+  if (body) {
+    const enc = new TextEncoder();
+    msg += 'Content-Length: ' + enc.encode(body).length + '\r\n';
   } else {
-    connect();
+    msg += 'Content-Length: 0\r\n';
+  }
+  msg += '\r\n';
+  if (body) msg += body;
+  return msg;
+}
+
+// ---- Digest MD5 ----
+function digestResponse(method, uri, user, realm, pass, nonce) {
+  const ha1 = md5(user + ':' + realm + ':' + pass);
+  const ha2 = md5(method + ':' + uri);
+  return md5(ha1 + ':' + nonce + ':' + ha2);
+}
+
+function parseAuthHeader(value) {
+  const obj = {};
+  if (!value) return obj;
+  const parts = value.split(/[,\s]+/);
+  for (const part of parts) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    const key = part.slice(0, eq).trim().toLowerCase();
+    let val = part.slice(eq + 1).trim();
+    if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
+    obj[key] = val;
+  }
+  return obj;
+}
+
+// ---- SIP functions ----
+function sendSip(msg) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    log('WebSocket no conectado', 'error');
+    return false;
+  }
+  ws.send(msg);
+  const firstLine = msg.split('\r\n')[0];
+  log('→ ' + firstLine);
+  return true;
+}
+
+function doRegister() {
+  const user = getVal('sipUser');
+  const domain = getVal('sipDomain');
+  const from = 'sip:' + user + '@' + domain;
+  const callId = makeCallId();
+  const branch = makeBranch();
+  const tag = makeTag();
+
+  const headers = {
+    'Via': 'SIP/2.0/TCP 0.0.0.0;branch=' + branch + ';rport',
+    'From': '<' + from + '>;tag=' + tag,
+    'To': '<' + from + '>',
+    'Call-ID': callId,
+    'CSeq': '1 REGISTER',
+    'Contact': '<' + from + '>',
+    'Max-Forwards': '70',
+  };
+
+  currentCallId = callId;
+  currentFromTag = tag;
+  dialog.regCallId = callId;
+  dialog.regFromTag = tag;
+  dialog.regCseq = 1;
+
+  sendSip(createSipMessage('REGISTER', 'sip:' + domain, headers));
+  return callId;
+}
+
+function doAuthRegister(authHeader) {
+  const user = getVal('sipUser');
+  const pass = getVal('sipPass');
+  const domain = getVal('sipDomain');
+  const from = 'sip:' + user + '@' + domain;
+  const challenge = parseAuthHeader(authHeader);
+  const realm = challenge.realm || domain;
+  const nonce = challenge.nonce || '';
+  const callId = dialog.regCallId || makeCallId();
+  const branch = makeBranch();
+  const tag = dialog.regFromTag || makeTag();
+  const cseq = (dialog.regCseq || 1) + 1;
+  dialog.regCseq = cseq;
+
+  const resp = digestResponse('REGISTER', 'sip:' + domain, user, realm, pass, nonce);
+
+  const headers = {
+    'Via': 'SIP/2.0/TCP 0.0.0.0;branch=' + branch + ';rport',
+    'From': '<' + from + '>;tag=' + tag,
+    'To': '<' + from + '>',
+    'Call-ID': callId,
+    'CSeq': cseq + ' REGISTER',
+    'Contact': '<' + from + '>',
+    'Max-Forwards': '70',
+    'Proxy-Authorization': 'Digest username="' + user + '", realm="' + realm + '", nonce="' + nonce + '", uri="sip:' + domain + '", response="' + resp + '"',
+  };
+
+  sendSip(createSipMessage('REGISTER', 'sip:' + domain, headers));
+}
+
+function handleSipResponse(raw) {
+  const msg = parseSipResponse(raw);
+  log('← ' + msg.status + ' ' + msg.reason);
+
+  // --- REGISTER responses ---
+  if (msg.status === 407 && !registered) {
+    const authHdr = msg.headers['proxy-authenticate'];
+    if (authHdr) {
+      log('Autenticando registro...');
+      doAuthRegister(authHdr);
+    } else {
+      log('No Proxy-Authenticate header', 'error');
+      registered = true; // intentar de todas formas
+      document.getElementById('callCard').style.display = 'block';
+      document.getElementById('btnConnect').textContent = '🔄 Reconectar';
+    }
+    return;
   }
 
-})();
+  if (msg.status === 200 && !registered) {
+    registered = true;
+    log('Registrado ✓', 'success');
+    document.getElementById('callCard').style.display = 'block';
+    document.getElementById('btnConnect').textContent = '🔄 Reconectar';
+    document.getElementById('btnCall').disabled = false;
+    return;
+  }
+
+  // --- INVITE responses ---
+  if (callActive && msg.headers['cseq'] && msg.headers['cseq'].includes('INVITE')) {
+    if (msg.status === 407) {
+      // Auth needed for INVITE too
+      const authHdr = msg.headers['proxy-authenticate'];
+      if (authHdr) doAuthInvite(msg, authHdr);
+      return;
+    }
+    if (msg.status === 180 || msg.status === 183) {
+      log('Timbrando...');
+      return;
+    }
+    if (msg.status === 200 && pc) {
+      const sdp = msg.body;
+      log('Conectado!', 'success');
+      if (sdp) {
+        pc.setRemoteDescription({ type: 'answer', sdp: sdp }).catch(e => log('SDP error: ' + e.message, 'error'));
+      }
+      // Send ACK
+      const branch = makeBranch();
+      const ack = createSipMessage('ACK', msg.headers['to'].match(/sip:[^\s;>]+/)[0], {
+        'Via': 'SIP/2.0/TCP 0.0.0.0;branch=' + branch + ';rport',
+        'From': msg.headers['from'],
+        'To': msg.headers['to'],
+        'Call-ID': msg.headers['call-id'],
+        'CSeq': msg.headers['cseq'].replace('INVITE', 'ACK'),
+        'Max-Forwards': '70',
+      });
+      sendSip(ack);
+      document.getElementById('btnCall').disabled = true;
+      document.getElementById('btnHangup').disabled = false;
+      return;
+    }
+  }
+
+  // --- BYE response ---
+  if (msg.status === 200 && msg.headers['cseq'] && msg.headers['cseq'].includes('BYE')) {
+    log('Llamada terminada', 'info');
+    cleanupCall();
+    return;
+  }
+
+  // --- Errors ---
+  if (msg.status >= 300 && msg.status !== 407) {
+    log('Error: ' + msg.status + ' ' + msg.reason, 'error');
+    cleanupCall();
+  }
+}
+
+function doAuthInvite(rs, authHeader) {
+  const user = getVal('sipUser');
+  const pass = getVal('sipPass');
+  const domain = getVal('sipDomain');
+  const number = getVal('destNum');
+  const toUri = 'sip:' + number + '@' + domain;
+  const fromUri = 'sip:' + user + '@' + domain;
+  const challenge = parseAuthHeader(authHeader);
+  const realm = challenge.realm || domain;
+  const nonce = challenge.nonce || '';
+
+  // Compute digest for INVITE
+  const resp = digestResponse('INVITE', toUri, user, realm, pass, nonce);
+
+  // Use the same call-id and increment CSeq
+  const branch = makeBranch();
+  const cseqMatch = rs.headers['cseq'] ? rs.headers['cseq'].match(/\d+/) : null;
+  const cseq = cseqMatch ? parseInt(cseqMatch[0], 10) + 1 : 2;
+
+  const sdpOffer = pc ? pc.localDescription.sdp : '';
+
+  let headers = {
+    'Via': 'SIP/2.0/TCP 0.0.0.0;branch=' + branch + ';rport',
+    'From': '<' + fromUri + '>;tag=' + currentFromTag,
+    'To': '<' + toUri + '>',
+    'Call-ID': currentCallId,
+    'CSeq': cseq + ' INVITE',
+    'Contact': '<' + fromUri + '>',
+    'Content-Type': 'application/sdp',
+    'Max-Forwards': '70',
+    'Proxy-Authorization': 'Digest username="' + user + '", realm="' + realm + '", nonce="' + nonce + '", uri="' + toUri + '", response="' + resp + '"',
+  };
+
+  sendSip(createSipMessage('INVITE', toUri, headers, sdpOffer));
+}
+
+// ---- WebRTC ----
+async function startWebRTC(number) {
+  try {
+    const domain = getVal('sipDomain');
+    const user = getVal('sipUser');
+    const fromUri = 'sip:' + user + '@' + domain;
+    const toUri = 'sip:' + number + '@' + domain;
+
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    log('Micrófono activado ✓');
+
+    pc = new RTCPeerConnection({ iceServers: [] });
+    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+    pc.ontrack = (ev) => {
+      log('Audio remoto recibido');
+      const audio = new Audio();
+      audio.srcObject = ev.streams[0];
+      audio.play().catch(e => log('Play error: ' + e.message, 'error'));
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      log('ICE: ' + pc.iceConnectionState);
+      if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+        log('Conexión de audio perdida', 'error');
+      }
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    // Wait for ICE gathering to complete
+    if (pc.iceGatheringState !== 'complete') {
+      await new Promise((resolve) => {
+        pc.onicegatheringstatechange = () => {
+          if (pc.iceGatheringState === 'complete') resolve();
+        };
+      });
+    }
+
+    log('SDP offer generado');
+
+    currentCallId = makeCallId();
+    currentFromTag = makeTag();
+    callActive = true;
+
+    const sdpOffer = pc.localDescription.sdp;
+    const branch = makeBranch();
+
+    const headers = {
+      'Via': 'SIP/2.0/TCP 0.0.0.0;branch=' + branch + ';rport',
+      'From': '<' + fromUri + '>;tag=' + currentFromTag,
+      'To': '<' + toUri + '>',
+      'Call-ID': currentCallId,
+      'CSeq': '1 INVITE',
+      'Contact': '<' + fromUri + '>',
+      'Content-Type': 'application/sdp',
+      'Max-Forwards': '70',
+    };
+
+    sendSip(createSipMessage('INVITE', toUri, headers, sdpOffer));
+  } catch (e) {
+    log('Error WebRTC: ' + e.message, 'error');
+    cleanupCall();
+  }
+}
+
+function cleanupCall() {
+  callActive = false;
+  if (pc) { pc.close(); pc = null; }
+  if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+  document.getElementById('btnCall').disabled = !registered;
+  document.getElementById('btnHangup').disabled = true;
+}
+
+// ---- UI handlers ----
+function connect() {
+  const url = getVal('wsUrl');
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.close();
+  }
+  log('Conectando a ' + url + '...');
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    log('WebSocket conectado ✓', 'success');
+    doRegister();
+  };
+
+  ws.onmessage = (ev) => {
+    const raw = typeof ev.data === 'string' ? ev.data : awaitData(ev.data);
+    handleSipResponse(raw);
+  };
+
+  ws.onclose = () => {
+    log('WebSocket desconectado', 'error');
+    registered = false;
+    cleanupCall();
+    document.getElementById('callCard').style.display = 'none';
+    document.getElementById('btnConnect').textContent = 'Conectar';
+  };
+
+  ws.onerror = (e) => {
+    log('Error WebSocket', 'error');
+  };
+}
+
+function makeCall() {
+  const number = getVal('destNum');
+  if (!number) { log('Ingresa un número', 'error'); return; }
+  if (callActive) { log('Ya hay una llamada activa', 'error'); return; }
+  log('Llamando a ' + number + '...');
+  startWebRTC(number);
+}
+
+async function hangup() {
+  if (!callActive) return;
+  const domain = getVal('sipDomain');
+  const user = getVal('sipUser');
+  const fromUri = 'sip:' + user + '@' + domain;
+  const number = getVal('destNum');
+  const toUri = 'sip:' + number + '@' + domain;
+  const branch = makeBranch();
+  const cseq = (dialog.invCseq || 2) + 1;
+
+  const headers = {
+    'Via': 'SIP/2.0/TCP 0.0.0.0;branch=' + branch + ';rport',
+    'From': '<' + fromUri + '>;tag=' + currentFromTag,
+    'To': '<' + toUri + '>',
+    'Call-ID': currentCallId,
+    'CSeq': cseq + ' BYE',
+    'Max-Forwards': '70',
+  };
+
+  sendSip(createSipMessage('BYE', toUri, headers));
+  log('Colgando...');
+}
+
+// Polyfill for async buffer reading
+async function awaitData(data) {
+  if (data instanceof Blob) {
+    return await data.text();
+  }
+  return data;
+}
+
+log('Página cargada. Presiona "Conectar" para iniciar.', 'info');
 </script>
 </body>
 </html>
