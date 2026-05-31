@@ -153,24 +153,30 @@ function buildSipRequest(req) {
 }
 
 // Parse a SIP response string into {status, reason, headers, content}
+// Handles Content-Length properly for TCP framing
 function parseSipResponse(text) {
   const idx = text.indexOf('\r\n\r\n');
   if (idx === -1) return null;
   const head = text.slice(0, idx);
-  const body = text.slice(idx + 4);
+  const bodyStart = idx + 4;
   const lines = head.split('\r\n');
   const sl = lines[0].match(/^SIP\/2\.0\s+(\d+)\s+(.*)$/);
   if (!sl) return null;
   const headers = {};
+  let contentLength = 0;
   for (let i = 1; i < lines.length; i++) {
     const m = lines[i].match(/^([^:]+):\s*(.*)$/);
     if (m) {
       const k = m[1].toLowerCase();
       const v = m[2];
+      if (k === 'content-length') contentLength = parseInt(v, 10) || 0;
       if (headers[k]) { if (!Array.isArray(headers[k])) headers[k] = [headers[k]]; headers[k].push(v); }
       else headers[k] = v;
     }
   }
+  const body = text.slice(bodyStart, bodyStart + contentLength);
+  // Only return complete message if we have all the body bytes
+  if (text.length < bodyStart + contentLength) return null;
   return { status: parseInt(sl[1]), reason: sl[2], headers, content: body };
 }
 
@@ -241,6 +247,23 @@ function sendSipTcp(req, cb, timeoutMs) {
 function stripQuotes(s) {
   if (typeof s === 'string' && s.length >= 2 && s[0] === '"' && s[s.length - 1] === '"') return s.slice(1, -1);
   return s;
+}
+
+// Parse a SIP auth header string like: Digest realm="...", nonce="..."
+function parseAuthHeader(str) {
+  if (!str) return null;
+  const m = str.match(/^\s*(\w+)\s+(.*)$/);
+  if (!m) return null;
+  const scheme = m[1];
+  const rest = m[2];
+  const params = {};
+  // Match key="value" or key=value patterns
+  const regex = /(\w+)\s*=\s*(?:"([^"]*)"|([^\s,]+))/g;
+  let match;
+  while ((match = regex.exec(rest)) !== null) {
+    params[match[1]] = match[2] !== undefined ? match[2] : match[3];
+  }
+  return { scheme, ...params };
 }
 
 // Global error handlers
@@ -382,7 +405,8 @@ wss.on('connection', (ws) => {
         sendDebug('SIP ' + rs.status + ' ' + (rs.reason || ''));
         if (rs.status === 407) {
           const challenges = rs.headers['proxy-authenticate'];
-          const challenge = Array.isArray(challenges) ? challenges[0] : challenges;
+          const challengeStr = Array.isArray(challenges) ? challenges[0] : challenges;
+          const challenge = parseAuthHeader(challengeStr);
           if (challenge) {
             pendingAuth = { challenge, user, pass, domain, number, fromUri, toUri };
             if (msg.requireAuth !== false) {
@@ -390,8 +414,8 @@ wss.on('connection', (ws) => {
               doInvite(challenge);
             } else {
               sendJSON({ type: 'auth_challenge', reqId, challenge: {
-                realm: stripQuotes(challenge.realm) || domain,
-                nonce: stripQuotes(challenge.nonce) || '',
+                realm: challenge.realm || domain,
+                nonce: challenge.nonce || '',
                 username: user,
                 uri: toUri,
               }});
