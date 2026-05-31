@@ -22,6 +22,34 @@ const SIP_PORT = 5060;
 
 const server = http.createServer((req, res) => {
   if (req.url === '/') { serveFile('index.html', res); }
+  else if (req.url === '/testtcp') {
+    dns.resolve4(SIP_HOST, (err, addrs) => {
+      if (err) { res.end('DNS error: ' + err.code); return; }
+      const ip = addrs[0];
+      const sock = new net.Socket();
+      sock.setTimeout(10000);
+      let buf = '';
+      sock.connect(SIP_PORT, ip, () => {
+        const msg = 'OPTIONS sip:' + SIP_HOST + ' SIP/2.0\r\n' +
+          'Via: SIP/2.0/TCP 0.0.0.0:0;branch=z9hG4bK-test\r\n' +
+          'From: <sip:test@test.com>;tag=test\r\n' +
+          'To: <sip:test@' + SIP_HOST + '>\r\n' +
+          'Call-ID: test@test\r\n' +
+          'CSeq: 1 OPTIONS\r\n' +
+          'Contact: <sip:test@0.0.0.0>\r\n' +
+          'Max-Forwards: 70\r\n' +
+          'Content-Length: 0\r\n\r\n';
+        sock.write(msg);
+      });
+      sock.on('data', (data) => { buf += data.toString(); });
+      sock.on('error', (e) => { res.end('TCP error: ' + e.message); sock.destroy(); });
+      sock.on('timeout', () => { res.end('TCP timeout'); sock.destroy(); });
+      setTimeout(() => {
+        res.end('Response:\n' + (buf || '(empty)') + '\n---END---');
+        sock.destroy();
+      }, 8000);
+    });
+  }
   else { res.writeHead(404); res.end('Not found'); }
 });
 
