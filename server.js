@@ -16,8 +16,18 @@ const MIME_TYPES = {
   '.ico': 'image/x-icon',
 };
 
+const dns = require('dns');
+
 const server = http.createServer((req, res) => {
   if (req.url === '/') { serveFile('index.html', res); }
+  else if (req.url === '/dns') {
+    dns.resolveSrv('_sip._udp.webdial.keepcalling.net', (err, srv) => {
+      dns.resolve4('webdial.keepcalling.net', (err2, addrs) => {
+        res.setHeader('Content-Type', 'text/plain');
+        res.end('SRV: ' + (err ? err.code : JSON.stringify(srv)) + '\nA: ' + (err2 ? err2.code : JSON.stringify(addrs)));
+      });
+    });
+  }
   else { res.writeHead(404); res.end('Not found'); }
 });
 
