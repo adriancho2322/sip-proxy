@@ -8,7 +8,7 @@ const dns = require('dns');
 
 const PORT = process.env.PORT || 80;
 const TARGET_HOST = 'webdial.keepcalling.net';
-const TARGET_PORT = 5060;
+const TARGET_PORTS = [8080, 443, 5060];
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
 const MIME_TYPES = {
@@ -62,24 +62,39 @@ wss.on('connection', (ws) => {
   let connected = false;
   let client = null;
   let bufQueue = [];
+  let tryIndex = 0;
+  let reconnectTimer = null;
+
+  function sendDebug(msg) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'debug', msg: msg }));
+    }
+  }
 
   dns.resolve4(TARGET_HOST, (err, addresses) => {
     const ip = err ? 'error: ' + err.message : addresses.join(', ');
     console.log('DNS resolve ' + TARGET_HOST + ' -> ' + ip);
-    ws.send(JSON.stringify({ type: 'debug', msg: 'DNS: ' + TARGET_HOST + ' = ' + ip }));
+    sendDebug('DNS: ' + TARGET_HOST + ' = ' + ip);
   });
 
-  function connectTCP() {
-    client = net.connect(TARGET_PORT, TARGET_HOST, () => {
-      connected = true;
-      const addr = client.remoteAddress || '?';
-      console.log('TCP conectado a', TARGET_HOST, addr + ':' + TARGET_PORT);
-      ws.send(JSON.stringify({ type: 'debug', msg: 'TCP conectado a ' + TARGET_HOST + ' (' + addr + ')' }));
+  function tryConnect() {
+    if (connected || tryIndex >= TARGET_PORTS.length) {
+      tryIndex = 0;
+      return;
+    }
 
-      // Enviar HaveSessionQ al navegador para iniciar el handshake
-      const handshake = JSON.stringify({ HaveSessionQ: true, reqID: "0" });
-      ws.send(handshake);
-      console.log('-> Enviado HaveSessionQ al navegador');
+    const port = TARGET_PORTS[tryIndex];
+    console.log('Trying ' + TARGET_HOST + ':' + port);
+    sendDebug('Conectando a ' + TARGET_HOST + ':' + port + ' (TCP)...');
+
+    client = net.connect(port, TARGET_HOST, () => {
+      connected = true;
+      sendDebug('Conectado a ' + TARGET_HOST + ':' + port);
+      console.log('TCP connected to', TARGET_HOST + ':' + port);
+
+      // Iniciar handshake con el navegador
+      ws.send(JSON.stringify({ HaveSessionQ: true, reqID: "0" }));
+      console.log('Sent HaveSessionQ to browser');
 
       for (const msg of bufQueue) {
         client.write(typeof msg === 'string' ? msg : Buffer.from(msg));
@@ -96,21 +111,22 @@ wss.on('connection', (ws) => {
     });
 
     client.on('close', () => {
-      console.log('TCP closed');
       connected = false;
-      ws.send(JSON.stringify({ type: 'debug', msg: 'Conexión TCP cerrada, reconectando...' }));
-      setTimeout(connectTCP, 3000);
+      console.log('Connection to ' + TARGET_HOST + ':' + port + ' closed');
+      if (tryIndex < TARGET_PORTS.length - 1) {
+        tryIndex++;
+        sendDebug('Puerto ' + port + ' cerrado, probando ' + TARGET_PORTS[tryIndex] + '...');
+        tryConnect();
+      } else {
+        sendDebug('Todos los puertos fallaron, reintentando en 5s...');
+        reconnectTimer = setTimeout(() => { tryIndex = 0; tryConnect(); }, 5000);
+      }
     });
 
     client.on('error', (err) => {
       connected = false;
-      console.error('TCP error:', err.message);
-      ws.send(JSON.stringify({ type: 'debug', msg: 'Error TCP: ' + err.message }));
-    });
-
-    client.on('timeout', () => {
-      console.error('TCP timeout');
-      ws.send(JSON.stringify({ type: 'debug', msg: 'Timeout TCP, reconectando...' }));
+      console.error('Error connecting to', TARGET_HOST + ':' + port, err.message);
+      sendDebug('Error en puerto ' + port + ': ' + err.message);
       client.destroy();
     });
   }
@@ -128,6 +144,7 @@ wss.on('connection', (ws) => {
     console.log('Browser WebSocket closed');
     if (client && !client.destroyed) client.destroy();
     connected = false;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
   });
 
   ws.on('error', (err) => {
@@ -136,7 +153,7 @@ wss.on('connection', (ws) => {
     connected = false;
   });
 
-  connectTCP();
+  tryConnect();
 });
 
 server.listen(PORT, '0.0.0.0', () => {
