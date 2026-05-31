@@ -189,59 +189,65 @@ function sendSipTcp(req, cb, timeoutMs) {
     if (cb) cb({ status: 408, reason: 'Request Timeout', headers: {}, content: '' });
   }, timeoutMs || 15000);
 
-  dns.resolve4(SIP_HOST, (err, addrs) => {
-    if (done) return;
-    if (err || !addrs || !addrs.length) {
-      done = true; clearTimeout(timer);
-      if (cb) cb({ status: 500, reason: 'DNS resolution failed: ' + (err ? err.code : 'no addresses'), headers: {}, content: '' });
-      return;
-    }
-    const ip = addrs[0];
-    const sock = new net.Socket();
-    let buf = '';
-    let responded = false;
+    dns.resolve4(SIP_HOST, (err, addrs) => {
+      if (done) return;
+      if (err || !addrs || !addrs.length) {
+        done = true; clearTimeout(timer);
+        if (cb) cb({ status: 500, reason: 'DNS resolution failed: ' + (err ? err.code : 'no addresses'), headers: {}, content: '' });
+        return;
+      }
+      const ip = addrs[0];
+      console.log('SIP TCP connecting to', ip + ':' + SIP_PORT);
+      const sock = new net.Socket();
+      let buf = '';
+      let responded = false;
 
-    sock.setTimeout(timeoutMs || 15000);
-    sock.connect(SIP_PORT, ip, () => {
-      sock.write(msgStr);
-    });
+      sock.setTimeout(timeoutMs || 15000);
+      sock.connect(SIP_PORT, ip, () => {
+        console.log('SIP TCP connected, sending', req.method);
+        sock.write(msgStr);
+      });
 
-    sock.on('data', (data) => {
-      buf += data.toString('binary');
-      // Check if we have a complete SIP message (by Content-Length)
-      if (!responded) {
-        const rs = parseSipResponse(buf);
-        if (rs) {
-          responded = true; done = true; clearTimeout(timer);
-          try { sock.end(); } catch(e) {}
-          if (cb) cb(rs);
+      sock.on('data', (data) => {
+        buf += data.toString('binary');
+        console.log('SIP TCP received', data.length, 'bytes, total buf', buf.length);
+        if (!responded) {
+          const rs = parseSipResponse(buf);
+          if (rs) {
+            console.log('SIP TCP parsed response', rs.status);
+            responded = true; done = true; clearTimeout(timer);
+            try { sock.end(); } catch(e) {}
+            if (cb) cb(rs);
+          }
         }
-      }
-    });
+      });
 
-    sock.on('error', (e) => {
-      if (done) return; done = true; clearTimeout(timer);
-      try { sock.destroy(); } catch(ex) {}
-      if (cb) cb({ status: 500, reason: 'TCP error: ' + e.message, headers: {}, content: '' });
-    });
-
-    sock.on('close', () => {
-      if (!responded && !done) {
-        done = true; clearTimeout(timer);
-        const rs = parseSipResponse(buf);
-        if (rs) { if (cb) cb(rs); }
-        else if (cb) cb({ status: 500, reason: 'Connection closed without valid response', headers: {}, content: '' });
-      }
-    });
-
-    sock.on('timeout', () => {
-      if (!responded && !done) {
-        done = true; clearTimeout(timer);
+      sock.on('error', (e) => {
+        console.log('SIP TCP error:', e.message);
+        if (done) return; done = true; clearTimeout(timer);
         try { sock.destroy(); } catch(ex) {}
-        if (cb) cb({ status: 408, reason: 'TCP timeout', headers: {}, content: '' });
-      }
+        if (cb) cb({ status: 500, reason: 'TCP error: ' + e.message, headers: {}, content: '' });
+      });
+
+      sock.on('close', () => {
+        console.log('SIP TCP closed, responded=', responded);
+        if (!responded && !done) {
+          done = true; clearTimeout(timer);
+          const rs = parseSipResponse(buf);
+          if (rs) { if (cb) cb(rs); }
+          else if (cb) cb({ status: 500, reason: 'Connection closed without valid response', headers: {}, content: '' });
+        }
+      });
+
+      sock.on('timeout', () => {
+        console.log('SIP TCP timeout');
+        if (!responded && !done) {
+          done = true; clearTimeout(timer);
+          try { sock.destroy(); } catch(ex) {}
+          if (cb) cb({ status: 408, reason: 'TCP timeout', headers: {}, content: '' });
+        }
+      });
     });
-  });
 }
 
 function stripQuotes(s) {
@@ -362,19 +368,25 @@ wss.on('connection', (ws) => {
       const number = msg.number;
       const fromUri = 'sip:' + user + '@' + domain;
       const toUri = 'sip:' + number + '@' + domain;
+      const reqId = msg.reqId || rstring();
+      const callId = rstring();
+      const fromTag = rstring();
+      let cseq = Math.floor(Math.random() * 1e5);
 
       console.log('sip_call to', number);
       sendDebug('Llamando a ' + number);
 
       function doInvite(authHeader) {
+        cseq++;
+        sendDebug('doInvite called, cseq=' + cseq + ' auth=' + (authHeader ? 'yes' : 'no'));
         const req = {
           method: 'INVITE',
           uri: toUri,
           headers: {
             to: { uri: toUri },
-            from: { uri: fromUri, params: { tag: rstring() } },
-            'call-id': rstring(),
-            cseq: { method: 'INVITE', seq: Math.floor(Math.random() * 1e5) },
+            from: { uri: fromUri, params: { tag: fromTag } },
+            'call-id': callId,
+            cseq: { method: 'INVITE', seq: cseq },
             'content-type': 'application/sdp',
             contact: [{ uri: fromUri }],
             'max-forwards': '70',
@@ -382,9 +394,8 @@ wss.on('connection', (ws) => {
           content: 'v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n',
         };
         if (authHeader) {
-          const challenge = authHeader;
-          const realm = stripQuotes(challenge.realm) || domain;
-          const nonce = stripQuotes(challenge.nonce) || '';
+          const realm = authHeader.realm || domain;
+          const nonce = authHeader.nonce || '';
           const ha1 = crypto.createHash('md5').update(user + ':' + realm + ':' + pass).digest('hex');
           const ha2 = crypto.createHash('md5').update('INVITE' + ':' + toUri).digest('hex');
           const resp = crypto.createHash('md5').update(ha1 + ':' + nonce + ':' + ha2).digest('hex');
