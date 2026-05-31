@@ -48,18 +48,23 @@ function stripQuotes(s) {
 const wss = new WebSocket.Server({ server });
 
 wss.on('connection', (ws) => {
-  let pendingAuth = null; // pending auth challenge for re-invite
+  let pendingAuth = null;
 
-  function sendJSON(obj) { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); }
+  function sendJSON(obj) { try { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); } catch(e) {} }
   function sendDebug(msg) { sendJSON({ type: 'debug', msg: String(msg) }); }
-  function sendSipResponse(reqId, status, body, rawHeaders) {
-    sendJSON({ type: 'sip_response', reqId, status, body: body || '', headers: rawHeaders || {} });
+
+  function safeSipSend(req, cb) {
+    try {
+      sip.send(req, cb);
+    } catch(e) {
+      sendDebug('Error SIP: ' + e.message);
+      if (cb) cb({ status: 500, reason: 'Server error: ' + e.message, headers: {}, content: '' });
+    }
   }
 
   ws.on('message', (raw) => {
-    const str = Buffer.isBuffer(raw) ? raw.toString() : raw;
     let msg;
-    try { msg = JSON.parse(str); } catch (e) { return; }
+    try { msg = JSON.parse(Buffer.isBuffer(raw) ? raw.toString() : raw); } catch (e) { return; }
 
     // --- sip_call: send SIP request ---
     if (msg.action === 'sip_call') {
@@ -93,7 +98,7 @@ wss.on('connection', (ws) => {
           const nonce = stripQuotes(challenge.nonce) || '';
           const ha1 = crypto.createHash('md5').update(user + ':' + realm + ':' + pass).digest('hex');
           const ha2 = crypto.createHash('md5').update('INVITE' + ':' + toUri).digest('hex');
-          const response = crypto.createHash('md5').update(ha1 + ':' + nonce + ':' + ha2).digest('hex');
+          const resp = crypto.createHash('md5').update(ha1 + ':' + nonce + ':' + ha2).digest('hex');
           req.headers['proxy-authorization'] = [{
             scheme: 'Digest',
             username: user,
@@ -101,11 +106,10 @@ wss.on('connection', (ws) => {
             nonce: nonce,
             uri: toUri,
             algorithm: 'MD5',
-            response: response,
-            opaque: stripQuotes(challenge.opaque) || undefined,
+            response: resp,
           }];
         }
-        sip.send(req, (rs) => handleResponse(rs, reqId));
+        safeSipSend(req, (rs) => handleResponse(rs, reqId));
       }
 
       function handleResponse(rs, reqId) {
@@ -151,14 +155,15 @@ wss.on('connection', (ws) => {
           // Send ACK
           const contact = Array.isArray(rs.headers['contact']) ? rs.headers['contact'][0] : rs.headers['contact'];
           const contactUri = contact && contact.uri ? contact.uri : toUri;
-          sip.send({
+          const ackCseq = typeof rs.headers['cseq'] === 'object' ? rs.headers['cseq'].seq : NaN;
+          safeSipSend({
             method: 'ACK',
             uri: contactUri,
             headers: {
               to: rs.headers['to'],
               from: rs.headers['from'],
               'call-id': rs.headers['call-id'],
-              cseq: { method: 'ACK', seq: rs.headers['cseq'].seq || (typeof rs.headers['cseq'] === 'object' ? rs.headers['cseq'].seq : NaN) },
+              cseq: { method: 'ACK', seq: ackCseq },
               via: [],
             },
           });
@@ -199,13 +204,11 @@ wss.on('connection', (ws) => {
             nonce: nonce,
             uri: toUri,
             algorithm: 'MD5',
-            response: response,
-            opaque: stripQuotes(challenge.opaque) || undefined,
           }],
         },
         content: msg.sdp || 'v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n',
       };
-      sip.send(req, (rs) => {
+      safeSipSend(req, (rs) => {
         sendDebug('SIP ' + rs.status + ' ' + (rs.reason || ''));
         if (rs.status >= 200 && rs.status < 300) {
           sendJSON({
@@ -222,14 +225,15 @@ wss.on('connection', (ws) => {
           });
           const contact = Array.isArray(rs.headers['contact']) ? rs.headers['contact'][0] : rs.headers['contact'];
           const contactUri = contact && contact.uri ? contact.uri : toUri;
-          sip.send({
+          const ackCseq = typeof rs.headers['cseq'] === 'object' ? rs.headers['cseq'].seq : NaN;
+          safeSipSend({
             method: 'ACK',
             uri: contactUri,
             headers: {
               to: rs.headers['to'],
               from: rs.headers['from'],
               'call-id': rs.headers['call-id'],
-              cseq: { method: 'ACK', seq: rs.headers['cseq'].seq || (typeof rs.headers['cseq'] === 'object' ? rs.headers['cseq'].seq : NaN) },
+              cseq: { method: 'ACK', seq: ackCseq },
               via: [],
             },
           });
@@ -243,7 +247,7 @@ wss.on('connection', (ws) => {
     // --- sip_bye ---
     if (msg.action === 'sip_bye' && msg.headers) {
       const h = msg.headers;
-      sip.send({
+      safeSipSend({
         method: 'BYE',
         uri: h.to_uri || 'sip:none@none',
         headers: {
