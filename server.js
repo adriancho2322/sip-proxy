@@ -132,14 +132,13 @@ wss.on('connection', (ws) => {
   }
 
   ws.on('message', (raw, isBinary) => {
-    console.log('WS msg received, isBinary=' + isBinary + ' len=' + (raw.length || 0));
-    if (isBinary) { console.log('WS binary audio data'); handleAudioData(raw); return; }
+    if (isBinary) { handleAudioData(raw); return; }
     let msg;
-    try { msg = JSON.parse(raw.toString()); console.log('WS JSON:', JSON.stringify(msg).slice(0, 200)); } catch (e) { console.log('WS JSON parse error:', e.message); return; }
+    try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
 
     if (msg.type === 'start') { startAudioRelay(msg); return; }
     if (msg.type === 'stop') { stopAudioRelay(); return; }
-    if (msg.action === 'ping') { console.log('WS sending pong'); sendJSON({ type: 'pong' }); return; }
+    if (msg.action === 'ping') { sendJSON({ type: 'pong' }); return; }
 
     // --- sip_call: send SIP request ---
     if (msg.action === 'sip_call') {
