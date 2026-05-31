@@ -58,15 +58,20 @@ function serveFile(name, res) {
 const wss = new WebSocket.Server({ server });
 
 wss.on('connection', (ws) => {
+  let tcpConnected = false;
+
   const client = net.connect(TARGET_PORT, TARGET_HOST, () => {
-    console.log('TCP connected to', TARGET_HOST);
+    tcpConnected = true;
+    console.log('TCP connected to ' + TARGET_HOST + ':' + TARGET_PORT);
+    ws.send(JSON.stringify({ type: 'debug', msg: 'TCP conectado a ' + TARGET_HOST }));
   });
 
   ws.on('message', (data) => {
-    if (Buffer.isBuffer(data)) {
-      client.write(data);
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    if (tcpConnected) {
+      client.write(buf);
     } else {
-      client.write(data);
+      console.log('TCP not ready yet, buffering message');
     }
   });
 
@@ -81,9 +86,11 @@ wss.on('connection', (ws) => {
     client.destroy();
   });
 
-  client.on('close', () => {
-    console.log('TCP closed');
-    ws.close();
+  client.on('close', (hadError) => {
+    console.log('TCP closed (hadError=' + hadError + ')');
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.close();
+    }
   });
 
   ws.on('error', (err) => {
@@ -92,9 +99,22 @@ wss.on('connection', (ws) => {
   });
 
   client.on('error', (err) => {
-    console.error('TCP error:', err.message);
-    ws.close();
+    console.error('TCP error connecting to', TARGET_HOST + ':' + TARGET_PORT, err.message);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'debug', msg: 'Error TCP: ' + err.message }));
+      ws.close(1011, 'TCP error: ' + err.message);
+    }
   });
+
+  // Timeout si TCP no conecta en 15s
+  setTimeout(() => {
+    if (!tcpConnected && ws.readyState === WebSocket.OPEN) {
+      const msg = 'Timeout conectando a ' + TARGET_HOST + ':' + TARGET_PORT;
+      console.error(msg);
+      ws.send(JSON.stringify({ type: 'debug', msg: msg }));
+      ws.close(1011, msg);
+    }
+  }, 15000);
 });
 
 server.listen(PORT, '0.0.0.0', () => {
