@@ -34,7 +34,7 @@ function serveFile(name, res) {
 // SIP stack (shared)
 let sipReady = false;
 try {
-  sip.start({ tcp: true, udp: false, port: 0 }, function(rq) {
+  sip.start({ udp: true, tcp: false, port: 15060 }, function(rq) {
     if (!sipReady) return;
     try { sip.send(sip.makeResponse(rq, 404, 'Not Found')); } catch(e) {}
   });
