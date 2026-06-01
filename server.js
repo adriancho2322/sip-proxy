@@ -118,13 +118,13 @@ function parseSipResponse(text) {
   return { status: parseInt(sl[1]), reason: sl[2], headers, content: body };
 }
 
-// Simple SIP TCP send: resolve, connect, send, receive, callback, close
+// Simple SIP TCP send: resolve, connect, send, receive response(s), callback, close
 function sipSendTcp(req, cb, timeoutMs) {
   const msgStr = buildSipRequest(req);
   const timer = setTimeout(() => {
     if (cb) cb({ status: 408, reason: 'Request Timeout', headers: {}, content: '' });
     cb = null;
-  }, timeoutMs || 15000);
+  }, timeoutMs || 30000);
 
   dns.resolve4(SIP_HOST, (err, addrs) => {
     if (!cb) return;
@@ -136,37 +136,53 @@ function sipSendTcp(req, cb, timeoutMs) {
     const ip = addrs[0];
     const sock = new net.Socket();
     let buf = '';
-    let parsed = false;
+    let done = false;
 
-    sock.setTimeout(timeoutMs || 15000);
+    sock.setTimeout(timeoutMs || 30000);
     sock.connect(SIP_PORT, ip, () => sock.write(msgStr));
+
+    function handleData() {
+      if (done || !cb) return;
+      while (true) {
+        const rs = parseSipResponse(buf);
+        if (!rs) break;
+        const headerEnd = buf.indexOf('\r\n\r\n');
+        const contentLength = parseInt(rs.headers['content-length'] || '0', 10);
+        const msgLen = headerEnd + 4 + contentLength;
+        // Provisional (1xx): remove from buffer and keep waiting
+        if (rs.status >= 100 && rs.status < 200) {
+          buf = buf.slice(msgLen);
+          continue;
+        }
+        // Final response: deliver and close
+        buf = buf.slice(msgLen);
+        done = true; clearTimeout(timer);
+        try { sock.end(); } catch(e) {}
+        if (cb) cb(rs);
+        break;
+      }
+    }
 
     sock.on('data', (data) => {
       buf += data.toString('binary');
-      if (parsed) return;
-      const rs = parseSipResponse(buf);
-      if (rs) {
-        parsed = true; clearTimeout(timer);
-        try { sock.end(); } catch(e) {}
-        if (cb) cb(rs);
-      }
+      handleData();
     });
 
     sock.on('error', (e) => {
-      if (parsed || !cb) return; parsed = true; clearTimeout(timer);
+      if (done || !cb) return; done = true; clearTimeout(timer);
       try { sock.destroy(); } catch(e) {}
       if (cb) cb({ status: 500, reason: 'TCP error: ' + e.message, headers: {}, content: '' });
     });
 
     sock.on('close', () => {
-      if (parsed || !cb) return; parsed = true; clearTimeout(timer);
+      if (done || !cb) return; done = true; clearTimeout(timer);
       const rs = parseSipResponse(buf);
       if (rs) { if (cb) cb(rs); }
       else if (cb) cb({ status: 500, reason: 'Connection closed', headers: {}, content: '' });
     });
 
     sock.on('timeout', () => {
-      if (parsed || !cb) return; parsed = true; clearTimeout(timer);
+      if (done || !cb) return; done = true; clearTimeout(timer);
       try { sock.destroy(); } catch(e) {}
       if (cb) cb({ status: 408, reason: 'TCP timeout', headers: {}, content: '' });
     });
