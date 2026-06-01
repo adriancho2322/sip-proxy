@@ -356,6 +356,7 @@ wss.on('connection', (ws) => {
 
       sendDebug('Llamando a ' + number);
 
+      let authTried = false;
       function doInvite(authHeader) {
         cseq++;
         const req = {
@@ -397,7 +398,8 @@ wss.on('connection', (ws) => {
           const challenges = rs.headers['proxy-authenticate'];
           const challengeStr = Array.isArray(challenges) ? challenges[0] : challenges;
           const challenge = parseAuthHeader(challengeStr);
-          if (challenge) {
+          if (challenge && !authTried) {
+            authTried = true;
             pendingAuth = { challenge, user, pass, domain, number, fromUri, toUri };
             if (msg.requireAuth !== false) {
               sendDebug('Autenticando...');
@@ -483,39 +485,7 @@ wss.on('connection', (ws) => {
         },
         content: msg.sdp || 'v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n',
       };
-      safeSipSend(req, (rs) => {
-        sendDebug('SIP ' + rs.status + ' ' + (rs.reason || ''));
-        if (rs.status >= 200 && rs.status < 300) {
-          sendJSON({
-            type: 'call_connected',
-            reqId: msg.reqId,
-            sdp: rs.content || '',
-            headers: {
-              to: stringifyHeader(rs.headers['to']),
-              from: stringifyHeader(rs.headers['from']),
-              'call-id': stringifyHeader(rs.headers['call-id']),
-              cseq: stringifyHeader(rs.headers['cseq']),
-              contact: stringifyHeader(rs.headers['contact']),
-            },
-          });
-          const contact = Array.isArray(rs.headers['contact']) ? rs.headers['contact'][0] : rs.headers['contact'];
-          const contactUri = contact && contact.uri ? contact.uri : toUri;
-          const ackCseq = typeof rs.headers['cseq'] === 'object' ? rs.headers['cseq'].seq : NaN;
-          safeSipSend({
-            method: 'ACK',
-            uri: contactUri,
-            headers: {
-              to: rs.headers['to'],
-              from: rs.headers['from'],
-              'call-id': rs.headers['call-id'],
-              cseq: { method: 'ACK', seq: ackCseq },
-              via: [],
-            },
-          });
-        } else if (rs.status >= 300) {
-          sendJSON({ type: 'call_error', reqId: msg.reqId, status: rs.status, reason: rs.reason || '' });
-        }
-      });
+      safeSipSend(req, (rs) => handleResponse(rs, msg.reqId));
       return;
     }
 
