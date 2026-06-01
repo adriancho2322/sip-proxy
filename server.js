@@ -142,7 +142,12 @@ class SipTcpConnection {
         this.connected = true;
         this.connecting = false;
         cb();
-        this._flushQueue();
+        // Flush pending connect callbacks (not via _flushQueue, which treats request items as errors)
+        const q = this.queue;
+        this.queue = [];
+        for (const item of q) {
+          if (item.type === 'connect' && item.cb) item.cb();
+        }
       });
       this.sock.on('data', (data) => {
         this.buf += data.toString('binary');
@@ -155,6 +160,7 @@ class SipTcpConnection {
       this.sock.on('close', () => {
         this.connected = false;
         this.sock = null;
+        this._flushQueue(new Error('Connection closed'));
       });
       this.sock.on('timeout', () => {
         this.connected = false;
