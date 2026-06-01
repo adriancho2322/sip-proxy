@@ -39,6 +39,11 @@ function serveFile(name, res) {
 // Construct a SIP request string from an object like {method, uri, headers, content}
 function rstring() { return Math.floor(Math.random() * 1e12).toString(); }
 
+function sendDebug(msg) {
+  const payload = JSON.stringify({ type: 'debug', msg: String(msg) });
+  if (wss) wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
+}
+
 function buildSipRequest(req) {
   const hdrs = req.headers || {};
   let hasVia = false, hasContentLength = false;
@@ -113,152 +118,59 @@ function parseSipResponse(text) {
   return { status: parseInt(sl[1]), reason: sl[2], headers, content: body };
 }
 
-// Persistent SIP TCP connection manager
-class SipTcpConnection {
-  constructor() {
-    this.sock = null;
-    this.buf = '';
-    this.queue = [];
-    this.connected = false;
-    this.connecting = false;
-    this.ip = null;
-  }
+// Simple SIP TCP send: resolve, connect, send, receive, callback, close
+function sipSendTcp(req, cb, timeoutMs) {
+  const msgStr = buildSipRequest(req);
+  const timer = setTimeout(() => {
+    if (cb) cb({ status: 408, reason: 'Request Timeout', headers: {}, content: '' });
+    cb = null;
+  }, timeoutMs || 15000);
 
-  ensureConnected(cb) {
-    if (this.connected && this.sock) { sendDebug('[dbg] ensureConnected: already connected'); cb(); return; }
-    if (this.connecting) { sendDebug('[dbg] ensureConnected: queuing, already connecting'); this.queue.push({type:'connect', cb}); return; }
-    sendDebug('[dbg] ensureConnected: starting new connection to ' + SIP_HOST + ':' + SIP_PORT);
-    this.connecting = true;
-    dns.resolve4(SIP_HOST, (err, addrs) => {
-      if (err || !addrs || !addrs.length) {
-        sendDebug('[dbg] DNS failed: ' + (err ? err.code : 'no addresses'));
-        this.connecting = false;
-        cb(new Error('DNS failed: ' + (err ? err.code : 'no addresses')));
-        return;
-      }
-      sendDebug('[dbg] DNS resolved: ' + addrs[0]);
-      this.ip = addrs[0];
-      this.sock = new net.Socket();
-      this.sock.setTimeout(30000);
-      this.buf = '';
-      this.sock.connect(SIP_PORT, this.ip, () => {
-        sendDebug('[dbg] TCP connected to ' + this.ip + ':' + SIP_PORT);
-        this.connected = true;
-        this.connecting = false;
-        cb();
-        // Flush pending connect callbacks
-        const q = this.queue;
-        this.queue = [];
-        for (const item of q) {
-          if (item.type === 'connect' && item.cb) item.cb();
-        }
-      });
-      this.sock.on('data', (data) => {
-        sendDebug('[dbg] TCP recv ' + data.length + ' bytes');
-        this.buf += data.toString('binary');
-        this._tryParse();
-      });
-      this.sock.on('error', (e) => {
-        sendDebug('[dbg] TCP error: ' + e.message);
-        this.connected = false;
-        this._flushQueue(new Error('TCP error: ' + e.message));
-      });
-      this.sock.on('close', () => {
-        sendDebug('[dbg] TCP close');
-        this.connected = false;
-        this.sock = null;
-        this._flushQueue(new Error('Connection closed'));
-      });
-      this.sock.on('timeout', () => {
-        sendDebug('[dbg] TCP timeout');
-        this.connected = false;
-        try { this.sock.destroy(); } catch(e) {}
-        this.sock = null;
-      });
-      this.sock.on('data', (data) => {
-        this.buf += data.toString('binary');
-        this._tryParse();
-      });
-      this.sock.on('error', (e) => {
-        this.connected = false;
-        this._flushQueue(new Error('TCP error: ' + e.message));
-      });
-      this.sock.on('close', () => {
-        this.connected = false;
-        this.sock = null;
-        this._flushQueue(new Error('Connection closed'));
-      });
-      this.sock.on('timeout', () => {
-        this.connected = false;
-        try { this.sock.destroy(); } catch(e) {}
-        this.sock = null;
-      });
-    });
-  }
-
-  _tryParse() {
-    while (true) {
-      const rs = parseSipResponse(this.buf);
-      if (!rs) {
-        sendDebug('[dbg] _tryParse: no complete response yet (buf=' + this.buf.length + ' bytes)');
-        break;
-      }
-      sendDebug('[dbg] _tryParse: parsed ' + rs.status + ' ' + (rs.reason || ''));
-      const headerEnd = this.buf.indexOf('\r\n\r\n');
-      const contentLength = parseInt(rs.headers['content-length'] || '0', 10);
-      const msgLen = headerEnd + 4 + contentLength;
-      this.buf = this.buf.slice(msgLen);
-      const item = this.queue.find(q => q.type === 'request');
-      if (!item) continue;
-      // Final responses consume the callback; provisional (1xx) keep it
-      const isFinal = rs.status >= 200;
-      if (isFinal) {
-        this.queue = this.queue.filter(q => q !== item);
-        clearTimeout(item.timer);
-      }
-      if (item.cb) item.cb(rs);
+  dns.resolve4(SIP_HOST, (err, addrs) => {
+    if (!cb) return;
+    if (err || !addrs || !addrs.length) {
+      clearTimeout(timer);
+      if (cb) cb({ status: 500, reason: 'DNS failed: ' + (err ? err.code : 'no addresses'), headers: {}, content: '' });
+      return;
     }
-  }
+    const ip = addrs[0];
+    const sock = new net.Socket();
+    let buf = '';
+    let parsed = false;
 
-  _flushQueue(err) {
-    const q = this.queue;
-    this.queue = [];
-    for (const item of q) {
-      if (item.type === 'request') {
-        clearTimeout(item.timer);
-        if (item.cb) item.cb({ status: 500, reason: err ? err.message : 'Connection lost', headers: {}, content: '' });
-      } else if (item.type === 'connect') {
-        if (item.cb) item.cb(err);
-      }
-    }
-  }
+    sock.setTimeout(timeoutMs || 15000);
+    sock.connect(SIP_PORT, ip, () => sock.write(msgStr));
 
-  send(req, cb, timeoutMs) {
-    const msgStr = buildSipRequest(req);
-    const timer = setTimeout(() => {
-      const item = this.queue.find(q => q.type === 'request' && q.cb === cb);
-      if (item) {
-        this.queue = this.queue.filter(q => q !== item);
-        if (cb) cb({ status: 408, reason: 'Request Timeout', headers: {}, content: '' });
+    sock.on('data', (data) => {
+      buf += data.toString('binary');
+      if (parsed) return;
+      const rs = parseSipResponse(buf);
+      if (rs) {
+        parsed = true; clearTimeout(timer);
+        try { sock.end(); } catch(e) {}
+        if (cb) cb(rs);
       }
-    }, timeoutMs || 15000);
-
-    this.ensureConnected((err) => {
-      if (err) {
-        clearTimeout(timer);
-        if (cb) cb({ status: 500, reason: err.message, headers: {}, content: '' });
-        return;
-      }
-      this.queue.push({ type: 'request', cb, timer });
-      this.sock.write(msgStr);
     });
-  }
 
-  close() {
-    if (this.sock) { try { this.sock.end(); } catch(e) {} this.sock = null; }
-    this.connected = false;
-    this._flushQueue(new Error('Connection closed'));
-  }
+    sock.on('error', (e) => {
+      if (parsed || !cb) return; parsed = true; clearTimeout(timer);
+      try { sock.destroy(); } catch(e) {}
+      if (cb) cb({ status: 500, reason: 'TCP error: ' + e.message, headers: {}, content: '' });
+    });
+
+    sock.on('close', () => {
+      if (parsed || !cb) return; parsed = true; clearTimeout(timer);
+      const rs = parseSipResponse(buf);
+      if (rs) { if (cb) cb(rs); }
+      else if (cb) cb({ status: 500, reason: 'Connection closed', headers: {}, content: '' });
+    });
+
+    sock.on('timeout', () => {
+      if (parsed || !cb) return; parsed = true; clearTimeout(timer);
+      try { sock.destroy(); } catch(e) {}
+      if (cb) cb({ status: 408, reason: 'TCP timeout', headers: {}, content: '' });
+    });
+  });
 }
 
 function stripQuotes(s) {
@@ -295,17 +207,11 @@ wss.on('connection', (ws) => {
   let audioRelay = null;
   let pcmInputBuffer = Buffer.alloc(0);
   let pcmOutputBuffer = Buffer.alloc(0);
-  const sipConn = new SipTcpConnection();
 
   function sendJSON(obj) { try { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); } catch(e) {} }
-  function sendDebug(msg) { sendJSON({ type: 'debug', msg: String(msg) }); }
 
   function safeSipSend(req, cb) {
-    sendDebug('SIP enviando ' + req.method + ' ' + req.uri);
-    sipConn.send(req, (rs) => {
-      sendDebug('SIP respuesta ' + rs.status + ' ' + (rs.reason || ''));
-      if (cb) cb(rs);
-    });
+    sipSendTcp(req, cb);
   }
 
   // ---- Audio relay ----
@@ -540,7 +446,6 @@ wss.on('connection', (ws) => {
 
   ws.on('error', (e) => {});
   ws.on('close', (code, reason) => {
-    sipConn.close();
     stopAudioRelay();
   });
 });
