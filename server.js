@@ -168,18 +168,19 @@ class SipTcpConnection {
     while (true) {
       const rs = parseSipResponse(this.buf);
       if (!rs) break;
-      // Remove parsed message from buffer
       const headerEnd = this.buf.indexOf('\r\n\r\n');
       const contentLength = parseInt(rs.headers['content-length'] || '0', 10);
       const msgLen = headerEnd + 4 + contentLength;
       this.buf = this.buf.slice(msgLen);
-      // Find matching callback
       const item = this.queue.find(q => q.type === 'request');
-      if (item) {
+      if (!item) continue;
+      // Final responses consume the callback; provisional (1xx) keep it
+      const isFinal = rs.status >= 200;
+      if (isFinal) {
         this.queue = this.queue.filter(q => q !== item);
         clearTimeout(item.timer);
-        if (item.cb) item.cb(rs);
       }
+      if (item.cb) item.cb(rs);
     }
   }
 
