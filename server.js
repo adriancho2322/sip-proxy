@@ -122,7 +122,6 @@ function parseSipResponse(text) {
 function sipSendTcp(req, cb, timeoutMs) {
   const msgStr = buildSipRequest(req);
   const timer = setTimeout(() => {
-    sendDebug('[sipSendTcp] timeout for ' + req.method);
     if (cb) cb({ status: 408, reason: 'Request Timeout', headers: {}, content: '' });
     cb = null;
   }, timeoutMs || 30000);
@@ -152,12 +151,10 @@ function sipSendTcp(req, cb, timeoutMs) {
         const msgLen = headerEnd + 4 + contentLength;
         // Provisional (1xx): remove from buffer and keep waiting
         if (rs.status >= 100 && rs.status < 200) {
-          sendDebug('[sipSendTcp] provisional ' + rs.status + ' ' + (rs.reason || ''));
           buf = buf.slice(msgLen);
           continue;
         }
         // Final response: deliver and close
-        sendDebug('[sipSendTcp] final resp ' + rs.status + ' ' + (rs.reason || ''));
         buf = buf.slice(msgLen);
         done = true; clearTimeout(timer);
         try { sock.end(); } catch(e) {}
@@ -167,13 +164,11 @@ function sipSendTcp(req, cb, timeoutMs) {
     }
 
     sock.on('data', (data) => {
-      sendDebug('[sipSendTcp] recv ' + data.length + ' bytes');
       buf += data.toString('binary');
       handleData();
     });
 
     sock.on('error', (e) => {
-      sendDebug('[sipSendTcp] error: ' + e.message);
       if (done || !cb) return; done = true; clearTimeout(timer);
       try { sock.destroy(); } catch(e) {}
       if (cb) cb({ status: 500, reason: 'TCP error: ' + e.message, headers: {}, content: '' });
@@ -232,6 +227,7 @@ wss.on('connection', (ws) => {
   function sendJSON(obj) { try { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); } catch(e) {} }
 
   function safeSipSend(req, cb) {
+    sendDebug('SIP ' + req.method + ' ' + req.uri);
     sipSendTcp(req, cb);
   }
 
