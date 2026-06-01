@@ -125,29 +125,55 @@ class SipTcpConnection {
   }
 
   ensureConnected(cb) {
-    if (this.connected && this.sock) { cb(); return; }
-    if (this.connecting) { this.queue.push({type:'connect', cb}); return; }
+    if (this.connected && this.sock) { sendDebug('[dbg] ensureConnected: already connected'); cb(); return; }
+    if (this.connecting) { sendDebug('[dbg] ensureConnected: queuing, already connecting'); this.queue.push({type:'connect', cb}); return; }
+    sendDebug('[dbg] ensureConnected: starting new connection to ' + SIP_HOST + ':' + SIP_PORT);
     this.connecting = true;
     dns.resolve4(SIP_HOST, (err, addrs) => {
       if (err || !addrs || !addrs.length) {
+        sendDebug('[dbg] DNS failed: ' + (err ? err.code : 'no addresses'));
         this.connecting = false;
         cb(new Error('DNS failed: ' + (err ? err.code : 'no addresses')));
         return;
       }
+      sendDebug('[dbg] DNS resolved: ' + addrs[0]);
       this.ip = addrs[0];
       this.sock = new net.Socket();
       this.sock.setTimeout(30000);
       this.buf = '';
       this.sock.connect(SIP_PORT, this.ip, () => {
+        sendDebug('[dbg] TCP connected to ' + this.ip + ':' + SIP_PORT);
         this.connected = true;
         this.connecting = false;
         cb();
-        // Flush pending connect callbacks (not via _flushQueue, which treats request items as errors)
+        // Flush pending connect callbacks
         const q = this.queue;
         this.queue = [];
         for (const item of q) {
           if (item.type === 'connect' && item.cb) item.cb();
         }
+      });
+      this.sock.on('data', (data) => {
+        sendDebug('[dbg] TCP recv ' + data.length + ' bytes');
+        this.buf += data.toString('binary');
+        this._tryParse();
+      });
+      this.sock.on('error', (e) => {
+        sendDebug('[dbg] TCP error: ' + e.message);
+        this.connected = false;
+        this._flushQueue(new Error('TCP error: ' + e.message));
+      });
+      this.sock.on('close', () => {
+        sendDebug('[dbg] TCP close');
+        this.connected = false;
+        this.sock = null;
+        this._flushQueue(new Error('Connection closed'));
+      });
+      this.sock.on('timeout', () => {
+        sendDebug('[dbg] TCP timeout');
+        this.connected = false;
+        try { this.sock.destroy(); } catch(e) {}
+        this.sock = null;
       });
       this.sock.on('data', (data) => {
         this.buf += data.toString('binary');
@@ -173,7 +199,11 @@ class SipTcpConnection {
   _tryParse() {
     while (true) {
       const rs = parseSipResponse(this.buf);
-      if (!rs) break;
+      if (!rs) {
+        sendDebug('[dbg] _tryParse: no complete response yet (buf=' + this.buf.length + ' bytes)');
+        break;
+      }
+      sendDebug('[dbg] _tryParse: parsed ' + rs.status + ' ' + (rs.reason || ''));
       const headerEnd = this.buf.indexOf('\r\n\r\n');
       const contentLength = parseInt(rs.headers['content-length'] || '0', 10);
       const msgLen = headerEnd + 4 + contentLength;
