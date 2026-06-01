@@ -239,11 +239,18 @@ wss.on('connection', (ws) => {
     sock.on('message', (msg) => {
       if (msg.length < 12) return;
       const pt = msg.readUInt8(1) & 0x7f;
-      if (pt !== 8 && pt !== 0) return;
+      if (pt !== 0 && pt !== 8) return; // PCMU or PCMA
       const payload = msg.subarray(12);
       const pcm16 = Buffer.alloc(payload.length * 2);
-      for (let i = 0; i < payload.length; i++) pcm16.writeInt16LE(alawToLinear(payload[i]), i * 2);
-      pcmOutputBuffer = Buffer.concat([pcmOutputBuffer, pcm16]);
+      const decode = pt === 0 ? ulawToLinear : alawToLinear;
+      for (let i = 0; i < payload.length; i++) pcm16.writeInt16LE(decode(payload[i]), i * 2);
+      // Upsample 8kHz → 48kHz by repeating each sample 6 times
+      const upsampled = Buffer.alloc(payload.length * 12);
+      for (let i = 0; i < payload.length; i++) {
+        const val = pcm16.readInt16LE(i * 2);
+        for (let j = 0; j < 6; j++) upsampled.writeInt16LE(val, (i * 6 + j) * 2);
+      }
+      pcmOutputBuffer = Buffer.concat([pcmOutputBuffer, upsampled]);
       while (pcmOutputBuffer.length >= 192) {
         if (ws.readyState === WebSocket.OPEN) ws.send(pcmOutputBuffer.subarray(0, 192));
         pcmOutputBuffer = pcmOutputBuffer.subarray(192);
@@ -265,18 +272,19 @@ wss.on('connection', (ws) => {
   function handleAudioData(raw) {
     if (!audioRelay) return;
     pcmInputBuffer = Buffer.concat([pcmInputBuffer, Buffer.from(raw)]);
-    const targetSamples = 960;
+    // Browser sends 48kHz PCM16, target 8kHz PCMU → downsample by 6
+    const targetSamples = 960; // 20ms @ 48kHz
     while (pcmInputBuffer.length >= targetSamples * 2) {
       const packet = pcmInputBuffer.subarray(0, targetSamples * 2);
       pcmInputBuffer = pcmInputBuffer.subarray(targetSamples * 2);
-      const pcma = Buffer.alloc(160);
-      for (let i = 0; i < 160; i++) pcma[i] = linearToAlaw(packet.readInt16LE(i * 12));
+      const payload = Buffer.alloc(160); // 160 PCMU samples @ 8kHz = 20ms
+      for (let i = 0; i < 160; i++) payload[i] = linearToUlaw(packet.readInt16LE(i * 12));
       const rtp = Buffer.alloc(12 + 160);
-      rtp[0] = 0x80; rtp[1] = 0x88;
+      rtp[0] = 0x80; rtp[1] = 0x00; // PT=0 (PCMU)
       rtp.writeUInt16BE(audioRelay.seq, 2);
       rtp.writeUInt32BE(audioRelay.ts, 4);
       rtp.writeUInt32BE(audioRelay.ssrc, 8);
-      pcma.copy(rtp, 12);
+      payload.copy(rtp, 12);
       audioRelay.seq = (audioRelay.seq + 1) & 0xFFFF;
       audioRelay.ts += 160;
       audioRelay.sock.send(rtp, 0, rtp.length, audioRelay.rtpPort, audioRelay.rtpIp, (e) => {
@@ -394,7 +402,7 @@ wss.on('connection', (ws) => {
               from: rs.headers['from'],
               'call-id': rs.headers['call-id'],
               cseq: { method: 'ACK', seq: ackCseq },
-              via: [],
+              via: [{ host: SIP_HOST, port: String(SIP_PORT) }],
             },
           });
           return;
@@ -483,7 +491,32 @@ function parseHeader(str) {
   return { uri, params };
 }
 
-// Linear to A-law conversion
+// G.711 μ-law encode/decode
+function linearToUlaw(sample) {
+  if (sample > 32767) sample = 32767;
+  if (sample < -32768) sample = -32768;
+  const BIAS = 0x84;
+  let sign = (sample >> 8) & 0x80;
+  if (sign) sample = -sample;
+  if (sample > 32635) sample = 32635;
+  sample = (sample + BIAS) >> 3;
+  let exp = 0;
+  for (let t = sample; t > 1; t >>= 1) exp++;
+  exp = Math.max(0, exp - 4);
+  let mant = (sample >> exp) & 0x0F;
+  return ~(sign | (exp << 4) | mant) & 0xFF;
+}
+
+function ulawToLinear(ulaw) {
+  ulaw = ~ulaw & 0xFF;
+  let sign = (ulaw & 0x80) ? -1 : 1;
+  let exp = (ulaw >> 4) & 0x07;
+  let mant = ulaw & 0x0F;
+  let sample = ((mant << 3) | 0x84) << exp;
+  return sign * (sample - 0x84);
+}
+
+// G.711 A-law encode/decode
 function linearToAlaw(sample) {
   if (sample >= 0) {
     if (sample > 0x7fff) sample = 0x7fff;
